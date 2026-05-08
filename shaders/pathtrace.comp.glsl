@@ -197,7 +197,6 @@ struct Material_Point
 };
 Material_Point Material_Point_ZERO;
 void main();
-vec3 test(uint gbufs_id_, vec2 global_invocation_id_, _res_ptr_Data data_);
 vec3 bake_texel(vec3 world_pos_, vec3 world_normal_, Scene scene_, uint tlas_, uint sampler_);
 vec3 pathtrace(Ray start_ray_, Scene scene_, uint tlas_, uint sampler_);
 Hit_Info ray_scene_intersection(Ray ray_, Scene scene_, uint tlas_);
@@ -259,12 +258,27 @@ void main()
     init_rng(uint(((global_invocation_id_.y * data_._res_.resolution_.x) + global_invocation_id_.x)), data_._res_.accum_counter_);
     if(data_._res_.is_lightmap_)
     {
+        vec4 pos_sample_;
+        vec4 normal_sample_;
+        vec3 normal_;
+        Ray start_ray_;
         if(((global_invocation_id_.x >= data_._res_.resolution_.x) || (global_invocation_id_.y >= data_._res_.resolution_.y)))
         {
             return ;
         }
 
-        color_ = test(data_._res_.gbufs_id_, global_invocation_id_.xy, data_);
+        pos_sample_ = texture_load((data_._res_.gbufs_id_ + 0), global_invocation_id_.xy);
+        normal_sample_ = texture_load((data_._res_.gbufs_id_ + 1), global_invocation_id_.xy);
+        if((normal_sample_.a < 0.1))
+        {
+            texture_store(data_._res_.output_texture_id_, global_invocation_id_.xy, vec4(0));
+            return ;
+        }
+
+        normal_ = normalize(((normal_sample_ * 2.0) - 1.0).xyz);
+        start_ray_.ori_ = (pos_sample_.xyz + (normal_ * 0.0011));
+        start_ray_.dir_ = (-normal_);
+        color_ = bake_texel(pos_sample_.xyz, normal_, data_._res_.scene_, data_._res_.tlas_, data_._res_.linear_sampler_);
     }
     else
     {
@@ -296,25 +310,6 @@ uv_ = (global_invocation_id_.xy / data_._res_.resolution_);coord_ = ((2.0 * uv_)
         texture_store(data_._res_.output_texture_id_, global_invocation_id_.xy, vec4(color_, 1));
     }
 
-}
-
-vec3 test(uint gbufs_id_, vec2 global_invocation_id_, _res_ptr_Data data_)
-{
-    vec4 pos_sample_ = vec4_ZERO;
-    vec4 normal_sample_ = vec4_ZERO;
-    vec3 normal_ = vec3_ZERO;
-    Ray start_ray_ = Ray_ZERO;
-    pos_sample_ = texture_load((gbufs_id_ + 0), global_invocation_id_.xy);
-    normal_sample_ = texture_load((gbufs_id_ + 1), global_invocation_id_.xy);
-    if((normal_sample_.a < 0.1))
-    {
-        return vec3(0);
-    }
-
-    normal_ = normalize(((normal_sample_ * 2.0) - 1.0).xyz);
-    start_ray_.ori_ = (pos_sample_.xyz + (normal_ * 0.0011));
-    start_ray_.dir_ = (-normal_);
-    return bake_texel(pos_sample_.xyz, normal_, data_._res_.scene_, data_._res_.tlas_, data_._res_.linear_sampler_);
 }
 
 vec3 bake_texel(vec3 world_pos_, vec3 world_normal_, Scene scene_, uint tlas_, uint sampler_)

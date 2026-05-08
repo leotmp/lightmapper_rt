@@ -53,18 +53,19 @@ main :: (data: ^Data @data, global_invocation_id: vec3 @global_invocation_id)
             return;
         }
 
-        color = test(data.gbufs_id, global_invocation_id.xy, data);
-        /*
         pos_sample    := texture_load(data.gbufs_id + 0, global_invocation_id.xy);
         normal_sample := texture_load(data.gbufs_id + 1, global_invocation_id.xy);
-        if normal_sample.a < 0.1 { return; }
+        if normal_sample.a < 0.1 {
+            texture_store(data.output_texture_id, global_invocation_id.xy, vec4(0));
+            return;
+        }
 
         normal := normalize((normal_sample * 2.0 - 1.0).xyz);
 
+        start_ray: Ray;
         start_ray.ori = pos_sample.xyz + normal * 0.0011;
         start_ray.dir = -normal;
         color = bake_texel(pos_sample.xyz, normal, data.scene, data.tlas, data.linear_sampler);
-        */
     }
     else
     {
@@ -96,20 +97,6 @@ main :: (data: ^Data @data, global_invocation_id: vec3 @global_invocation_id)
 
         texture_store(data.output_texture_id, global_invocation_id.xy, vec4(color, 1));
     }
-}
-
-test :: (gbufs_id: texture_rw_id, global_invocation_id: vec2, data: ^Data) -> vec3
-{
-    pos_sample    := texture_load(gbufs_id + 0, global_invocation_id.xy);
-    normal_sample := texture_load(gbufs_id + 1, global_invocation_id.xy);
-    if normal_sample.a < 0.1 { return vec3(0); }
-
-    normal := normalize((normal_sample * 2.0 - 1.0).xyz);
-
-    start_ray: Ray;
-    start_ray.ori = pos_sample.xyz + normal * 0.0011;
-    start_ray.dir = -normal;
-    return bake_texel(pos_sample.xyz, normal, data.scene, data.tlas, data.linear_sampler);
 }
 
 bake_texel :: (world_pos: vec3, world_normal: vec3, scene: Scene, tlas: bvh_id, sampler: sampler_id) -> vec3

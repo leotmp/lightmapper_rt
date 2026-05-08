@@ -1657,7 +1657,7 @@ ui_update :: proc(ui: ^UI_State, debug_viz_draw_calls: []UV_Mesh_Draw_Call, text
                 imgui.same_line()
                 imgui.drag_float("###emission_y", &ui.lights.sun_emission.y, 1)
                 imgui.same_line()
-                imgui.drag_float("Sun Strength", &ui.lights.sun_emission.z, 1)
+                imgui.drag_float("Sun Emission", &ui.lights.sun_emission.z, 1)
                 imgui.pop_item_width()
 
                 ui.do_reset_bake = false

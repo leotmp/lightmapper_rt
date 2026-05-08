@@ -60,11 +60,11 @@ void main()
     vec2 gid_ = vec2_ZERO;
     vec2 tex_size_ = vec2_ZERO;
     vec4 src_color_ = vec4_ZERO;
-    vec4 sample_sum_ = vec4_ZERO;
+    vec3 sample_sum_ = vec3_ZERO;
     uint sample_count_ = uint_ZERO;
     gid_ = gid3_.xy;
     tex_size_ = min(image_size(data_._res_.output_), image_size(data_._res_.input_));
-    if(((((gid_.x < 0) || (gid_.x > tex_size_.x)) || (gid_.y < 0)) || (gid_.y > tex_size_.y)))
+    if(((((gid_.x < 0) || (gid_.x >= tex_size_.x)) || (gid_.y < 0)) || (gid_.y >= tex_size_.y)))
     {
         return ;
     }
@@ -76,6 +76,8 @@ void main()
         return ;
     }
 
+    sample_sum_ = vec3(0);
+    sample_count_ = 0;
     // for construct
     {
         int dy_;
@@ -92,7 +94,7 @@ void main()
                     neighbor_color_ = texture_load(data_._res_.input_, neighbor_coord_);
                     if((neighbor_color_.a > 0.5))
                     {
-                        sample_sum_ += neighbor_color_;
+                        sample_sum_ += neighbor_color_.rgb;
                         sample_count_ += 1;
                     }
 
@@ -104,7 +106,7 @@ void main()
 
     if((sample_count_ > 0))
     {
-        texture_store(data_._res_.output_, gid_, (sample_sum_ / float(sample_count_)));
+        texture_store(data_._res_.output_, gid_, vec4((sample_sum_ / float(sample_count_)), 1));
     }
     else
     {
