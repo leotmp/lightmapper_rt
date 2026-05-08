@@ -33,6 +33,7 @@ Context :: struct
 
     desc_pool: ^gpu.Descriptor_Pool,
     linear_sampler_id: u32,
+    point_sampler_id: u32,
 
     // Upload resources
     bvh_scratch_arena: gpu.Arena,  // GPU local
@@ -51,6 +52,7 @@ init :: proc(ctx: ^Context, desc_pool: ^gpu.Descriptor_Pool)
     ctx.upload_arena = gpu.arena_init()
     ctx.desc_pool = desc_pool
     ctx.linear_sampler_id = gpu.desc_pool_alloc_sampler(desc_pool, gpu.sampler_descriptor({}))
+    ctx.point_sampler_id = gpu.desc_pool_alloc_sampler(desc_pool, gpu.sampler_descriptor({ min_filter = .Nearest, mag_filter = .Nearest }))
     pool_init(&ctx.meshes)
     pool_init(&ctx.lm_uvs)
 }
@@ -168,6 +170,7 @@ Bake :: struct
     pathtrace_output_rw_id: u32,
     tmp_tex: gpu.Owned_Texture,
     tmp_tex_id: u32,
+    tmp_tex_rw_id: u32,
 
     // OIDN
     shared_buf_vk: External_Buf,
@@ -195,8 +198,8 @@ Instance :: struct
 Lights :: struct
 {
     sun_dir: [3]f32,
-    sun_radius: f32,  // Radians
-    sun_emission: [3]f32,
+    sun_radius: f32,       // Radians
+    sun_emission: [3]f32,  // NOTE: This is total emission across the sun's surface
 }
 
 bake_begin :: proc(ctx: ^Context, #any_int lightmap_size: i64, samples: u32, lightmap: gpu.Texture, instances: []Instance, lights: Lights) -> Bake
@@ -228,6 +231,7 @@ bake_begin :: proc(ctx: ^Context, #any_int lightmap_size: i64, samples: u32, lig
         usage = { .Sampled, .Storage, .Transfer_Src, .Color_Attachment }
     })
     bake.tmp_tex_id = gpu.desc_pool_alloc_texture(ctx.desc_pool, gpu.texture_view_descriptor(bake.tmp_tex, {}))
+    bake.tmp_tex_rw_id = gpu.desc_pool_alloc_texture_rw(ctx.desc_pool, gpu.texture_rw_view_descriptor(bake.tmp_tex, {}))
 
     bake.shared_buf_vk = create_vk_external_buffer_for_oidn(u32(lightmap_size * lightmap_size * 2 * 4))  // TODO: What about other formats?
     bake.shared_buf_oidn = oidn_shared_buffer_from_vk_buffer(ctx.oidn_device, bake.shared_buf_vk)
@@ -319,10 +323,11 @@ bake_iteration :: proc(bake: ^Bake, frame_arena: ^gpu.Arena, instances: []Instan
         }
     }
 
-    gpu.cmd_blit_texture(cmd_buf, bake.pathtrace_output, bake.tmp_tex, { {} }, { {} }, .Linear)
+    gpu.cmd_blit_texture(cmd_buf, bake.pathtrace_output, bake.tmp_tex,  { {} }, { {} }, .Linear)
+    gpu.cmd_blit_texture(cmd_buf, bake.pathtrace_output, bake.lightmap, { {} }, { {} }, .Linear)
     gpu.cmd_barrier(cmd_buf, .All, .All)
 
-    gpu.cmd_blit_texture(cmd_buf, bake.tmp_tex, bake.lightmap, { {} }, { {} }, .Linear)
+    dilate(bake, cmd_buf, frame_arena, resolution)
     gpu.cmd_barrier(cmd_buf, .All, .All)
 
     if fix_seams
@@ -575,6 +580,8 @@ pathtrace :: proc(bake: ^Bake, cmd_buf: gpu.Command_Buffer, frame_arena: ^gpu.Ar
         gbufs_id: u32,
     }
 
+    sun_solid_angle := 2 * math.PI * (1 - math.cos(lights.sun_radius))
+
     compute_data := gpu.arena_alloc(frame_arena, Compute_Data)
     compute_data.cpu^ = {
         output_texture_id = texture_rw_id,
@@ -586,7 +593,7 @@ pathtrace :: proc(bake: ^Bake, cmd_buf: gpu.Command_Buffer, frame_arena: ^gpu.Ar
             lights = {
                 dir_light_dir   = lights.sun_dir,
                 dir_light_angle = lights.sun_radius,
-                dir_light_emission = lights.sun_emission,
+                dir_light_emission = lights.sun_emission / sun_solid_angle,
             }
         },
         accum_counter = accum_counter,
@@ -796,7 +803,7 @@ compute_seams :: proc(positions: [][3]f32, normals: [][3]f32, lm_uvs: [][2]f32, 
     }
 }
 
-smooth_seams :: proc(bake: ^Bake, cmd_buf: gpu.Command_Buffer, upload_arena: ^gpu.Arena, instances: []Instance, meshes: []Resource(Mesh), lm_uvs: []Resource(LM_UVs), resolution: [2]f32)
+smooth_seams :: proc(bake: ^Bake, cmd_buf: gpu.Command_Buffer, frame_arena: ^gpu.Arena, instances: []Instance, meshes: []Resource(Mesh), lm_uvs: []Resource(LM_UVs), resolution: [2]f32)
 {
     textures := [2]gpu.Texture { bake.tmp_tex, bake.lightmap }
     texture_ids := [2]u32 { bake.tmp_tex_id, bake.lightmap_id }
@@ -842,7 +849,7 @@ smooth_seams :: proc(bake: ^Bake, cmd_buf: gpu.Command_Buffer, upload_arena: ^gp
                         resolution: [2]f32,
                         a_to_b: b32,
                     }
-                    vert_data := gpu.arena_alloc(upload_arena, Vertex_Data)
+                    vert_data := gpu.arena_alloc(frame_arena, Vertex_Data)
                     vert_data.cpu^ = Vertex_Data {
                         lm_uvs = lightmap_uvs.gpu.ptr,
                         seams = seams.gpu.ptr,
@@ -853,10 +860,10 @@ smooth_seams :: proc(bake: ^Bake, cmd_buf: gpu.Command_Buffer, upload_arena: ^gp
                         tex: u32,
                         sampler: u32,
                     }
-                    frag_data := gpu.arena_alloc(upload_arena, Frag_Data)
+                    frag_data := gpu.arena_alloc(frame_arena, Frag_Data)
                     frag_data.cpu^ = Frag_Data {
                         tex = tex_input,
-                        sampler = bake.ctx.linear_sampler_id,
+                        sampler = bake.ctx.point_sampler_id,
                     }
                     gpu.cmd_draw(cmd_buf, vert_data, frag_data, u32(gpu.slice_len(seams)) * 6)
                 }
@@ -867,6 +874,28 @@ smooth_seams :: proc(bake: ^Bake, cmd_buf: gpu.Command_Buffer, upload_arena: ^gp
     }
 
     gpu.cmd_barrier(cmd_buf, .All, .All)
+}
+
+// Lightmap dilation
+
+dilate :: proc(bake: ^Bake, cmd_buf: gpu.Command_Buffer, frame_arena: ^gpu.Arena, resolution: [2]f32)
+{
+    gpu.cmd_set_compute_shader(cmd_buf, bake.ctx.shaders.dilate)
+
+    Data :: struct #all_or_none {
+        output: u32,
+        input: u32,
+    }
+    data := gpu.arena_alloc(frame_arena, Data)
+    data.cpu^ = Data {
+        output = bake.lightmap_rw_id,
+        input = bake.tmp_tex_rw_id,
+    }
+    gpu.cmd_set_desc_pool(cmd_buf, bake.ctx.desc_pool^)
+
+    num_groups_x := (u32(resolution.x) + 8 - 1) / 8
+    num_groups_y := (u32(resolution.y) + 8 - 1) / 8
+    gpu.cmd_dispatch(cmd_buf, data, num_groups_x, num_groups_y, 1)
 }
 
 // OIDN interop:

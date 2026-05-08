@@ -1554,7 +1554,8 @@ make_ui_default :: proc() -> UI_State
     res.light_radius_deg = 0.2
 
     res.lights.sun_dir = dir_from_spherical_coords(math.RAD_PER_DEG * res.light_azimuth, math.RAD_PER_DEG * res.light_elevation)
-    res.lights.sun_emission = { 2000000.0, 1840000.0, 1640000.0 }
+
+    res.lights.sun_emission = { 68.0, 62.0, 62.0 }
     res.lights.sun_radius = math.RAD_PER_DEG * res.light_radius_deg
     return res
 }
@@ -1648,15 +1649,15 @@ ui_update :: proc(ui: ^UI_State, debug_viz_draw_calls: []UV_Mesh_Draw_Call, text
                 ui.lights.sun_dir = dir_from_spherical_coords(math.RAD_PER_DEG * ui.light_azimuth, math.RAD_PER_DEG * ui.light_elevation)
                 imgui.pop_item_width()
 
-                imgui.drag_float("Sun Radius (degrees)", &ui.light_radius_deg, 0.01)
+                imgui.drag_float("Sun Radius (degrees)", &ui.light_radius_deg, 0.01, 0.0000001)
                 ui.lights.sun_radius = math.RAD_PER_DEG * ui.light_radius_deg
 
                 imgui.push_item_width(SETTINGS_WIDTH / 3)
-                imgui.drag_float("###emission_x", &ui.lights.sun_emission.x, 1000)
+                imgui.drag_float("###emission_x", &ui.lights.sun_emission.x, 1)
                 imgui.same_line()
-                imgui.drag_float("###emission_y", &ui.lights.sun_emission.y, 1000)
+                imgui.drag_float("###emission_y", &ui.lights.sun_emission.y, 1)
                 imgui.same_line()
-                imgui.drag_float("Sun Strength", &ui.lights.sun_emission.z, 1000)
+                imgui.drag_float("Sun Strength", &ui.lights.sun_emission.z, 1)
                 imgui.pop_item_width()
 
                 ui.do_reset_bake = false
