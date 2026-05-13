@@ -16,6 +16,7 @@ import "core:sort"
 import "core:sync"
 import "core:mem"
 import vmem "core:mem/virtual"
+import "core:thread"
 
 import vk "vendor:vulkan"
 import "no_gfx_api/gpu"
@@ -166,6 +167,12 @@ Bake :: struct
     lightmap_id: u32,
     gbufs_id: u32,
 
+    denoise_done: bool,
+    denoise_thread: ^thread.Thread,
+    state: Bake_State,
+    bake_sem: gpu.Semaphore,
+    bake_counter: u64,
+
     pathtrace_output: gpu.Owned_Texture,
     pathtrace_output_rw_id: u32,
     tmp_tex: gpu.Owned_Texture,
@@ -298,14 +305,38 @@ bake_iteration :: proc(bake: ^Bake, frame_arena: ^gpu.Arena, instances: []Instan
     bake.instances = slice.clone_to_dynamic(instances)
     bake.lights = lights
 
-    cmd_buf := gpu.commands_begin(.Main)
-
     resolution := [2]f32 { f32(bake.lightmap_size), f32(bake.lightmap_size) }
     if bake.accum_counter < bake.max_samples
     {
+        cmd_buf := gpu.commands_begin(.Main)
         gpu.cmd_barrier(cmd_buf, .All, .All, {})  // TODO
         pathtrace(bake, cmd_buf, frame_arena, .Lightmap, {}, bake.pathtrace_output_rw_id, 4096, bake.accum_counter, bake.lights)  // TODO
         gpu.cmd_barrier(cmd_buf, .All, .All, {})  // TODO
+
+        switch bake.state
+        {
+            case .Start: {}
+            case .Wait_For_Denoise:
+            {
+                denoise_done := intr.volatile_load(&bake.denoise_done)
+                if denoise_done
+                {
+                    fmt.println("denoise done")
+                    bake.state = .Wait_For_Copy
+                }
+            }
+            case .Wait_For_Copy:
+            {
+                sem_value := gpu.semaphore_get_value(bake.bake_sem)
+                copy_done := sem_value >= 3  // TODO
+                if copy_done
+                {
+                    fmt.println("Copy done")
+                    start_denoise_lightmap_filter(bake)
+                    bake.state = .Wait_For_Denoise
+                }
+            }
+        }
 
         // if denoise
         //if bake.accum_counter == bake.max_samples - 1
@@ -323,6 +354,7 @@ bake_iteration :: proc(bake: ^Bake, frame_arena: ^gpu.Arena, instances: []Instan
         }
     }
 
+    cmd_buf := gpu.commands_begin(.Main)
     gpu.cmd_blit_texture(cmd_buf, bake.pathtrace_output, bake.tmp_tex,  { {} }, { {} }, .Linear)
     gpu.cmd_blit_texture(cmd_buf, bake.pathtrace_output, bake.lightmap, { {} }, { {} }, .Linear)
     gpu.cmd_barrier(cmd_buf, .All, .All)
@@ -347,6 +379,10 @@ bake_is_done :: proc(bake: ^Bake) -> bool
 
 bake_destroy :: proc(bake: ^Bake)
 {
+    if bake.state == .Wait_For_Denoise {
+        thread.join(bake.denoise_thread)
+    }
+    thread.destroy(bake.denoise_thread)
     gbufs_destroy(&bake.gbufs)
     gpu.texture_free_and_destroy(&bake.pathtrace_output)
     gpu.texture_free_and_destroy(&bake.tmp_tex)
@@ -374,6 +410,13 @@ bake_debug_ground_truth :: proc(bake: ^Bake, cmd_buf: gpu.Command_Buffer, frame_
 
 /////////////////////////////
 // Internal
+
+Bake_State :: enum
+{
+    Start = 0,
+    Wait_For_Denoise,
+    Wait_For_Copy,  // Waiting for copy from pathtrace_output to tmp.
+}
 
 LM_UVs :: struct
 {
@@ -1085,6 +1128,15 @@ oidn_run_lightmap_filter :: proc(device: oidn.Device, filter: oidn.Filter)
     oidn.ExecuteFilter(filter)
     oidn.SyncDevice(device)
     oidn_check(device)
+}
+
+start_denoise_lightmap_filter :: proc(bake: ^Bake)
+{
+    bake.denoise_done = false
+    bake.denoise_thread = thread.create_and_start_with_poly_data(bake, proc(bake: ^Bake) {
+        oidn_run_lightmap_filter(bake.ctx.oidn_device, bake.filter)
+        intr.volatile_store(&bake.denoise_done, true)
+    })
 }
 
 oidn_check :: proc(device: oidn.Device)
