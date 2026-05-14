@@ -23,25 +23,25 @@ import "no_gfx_api/gpu"
 import oidn "../oidn_odin_bindings"
 
 // NOTE: Unfortunately OIDN does not yet support GPU synchronization
-// (external semaphores), so we'll need to synchronization on CPU side.
+// (external semaphores), so we'll need to do synchronization on the CPU side.
 // Instead of waiting on the CPU on each iteration, we can keep path tracing
 // in the meantime so that baking speed is not too affected.
 Bake_State :: enum
 {
     Start = 0,
     Wait_For_Denoise,
-    Wait_For_Copy,  // Waiting for copy from pathtrace_output to tmp.
+    Wait_For_Copy,  // Waiting for copy from pathtrace_output to the shader OIDN buffer.
 }
 
 bake_iteration_impl :: proc(bake: ^Bake, frame_arena: ^gpu.Arena, instances: []Instance, lights: Lights, fix_seams: bool)
 {
-        //if !fix_seams && bake.accum_counter >= bake.max_samples do return
+    //if !fix_seams && bake.accum_counter >= bake.max_samples do return
 
     delete(bake.instances)
     bake.instances = slice.clone_to_dynamic(instances)
     bake.lights = lights
 
-    resolution := [2]f32 { f32(bake.lightmap_size), f32(bake.lightmap_size) }
+    //resolution := [2]f32 { f32(bake.lightmap_size), f32(bake.lightmap_size) }
     if bake.accum_counter < bake.max_samples
     {
         cmd_buf := gpu.commands_begin(.Main)
@@ -49,11 +49,25 @@ bake_iteration_impl :: proc(bake: ^Bake, frame_arena: ^gpu.Arena, instances: []I
         pathtrace(bake, cmd_buf, frame_arena, .Lightmap, {}, bake.pathtrace_output_rw_id, 4096, bake.accum_counter, bake.lights)  // TODO
         gpu.cmd_barrier(cmd_buf, .All, .All, {})  // TODO
 
+        if bake.accum_counter == 0 do bake.state = .Start
+        bake.accum_counter = min(bake.max_samples, bake.accum_counter + 1)
         next_counter := bake.bake_counter + 1
 
         switch bake.state
         {
-            case .Start: fallthrough
+            case .Start:
+            {
+                gpu.cmd_blit_texture(cmd_buf, bake.pathtrace_output, bake.lightmap,  { {} }, { {} }, .Linear)
+                if bake.accum_counter >= 10
+                {
+                    oidn_copy_to_shared_buf(cmd_buf, bake.shared_buf_vk, bake.pathtrace_output)
+                    gpu.cmd_barrier(cmd_buf, .All, .All)
+
+                    bake.denoise_thread = nil
+                    bake.state = .Wait_For_Copy
+                    bake.last_copy_counter = next_counter
+                }
+            }
             case .Wait_For_Denoise:
             {
                 denoise_done := intr.volatile_load(&bake.denoise_done)
@@ -61,12 +75,12 @@ bake_iteration_impl :: proc(bake: ^Bake, frame_arena: ^gpu.Arena, instances: []I
                 {
                     fmt.println("Denoise done")
                     if bake.denoise_thread != nil do thread.destroy(bake.denoise_thread)
+                    defer bake.denoise_thread = nil
 
-                    oidn_copy_from_shared_buf(cmd_buf, bake.pathtrace_output, bake.shared_buf_vk)
+                    oidn_copy_from_shared_buf(cmd_buf, bake.lightmap, bake.shared_buf_vk)
                     gpu.cmd_barrier(cmd_buf, .All, .All)
 
-                    gpu.cmd_blit_texture(cmd_buf, bake.pathtrace_output, bake.tmp_tex,  { {} }, { {} }, .Linear)
-                    gpu.cmd_blit_texture(cmd_buf, bake.pathtrace_output, bake.lightmap, { {} }, { {} }, .Linear)
+                    // gpu.cmd_blit_texture(cmd_buf, bake.pathtrace_output, bake.tmp_tex,  { {} }, { {} }, .Linear)
 
                     oidn_copy_to_shared_buf(cmd_buf, bake.shared_buf_vk, bake.pathtrace_output)
                     gpu.cmd_barrier(cmd_buf, .All, .All)
@@ -97,7 +111,6 @@ bake_iteration_impl :: proc(bake: ^Bake, frame_arena: ^gpu.Arena, instances: []I
         //if bake.accum_counter == bake.max_samples - 1
         when false
         {
-
             gpu.queue_submit(.Main, { cmd_buf })
             gpu.queue_wait_idle(.Main)
 
@@ -107,8 +120,11 @@ bake_iteration_impl :: proc(bake: ^Bake, frame_arena: ^gpu.Arena, instances: []I
             oidn_copy_from_shared_buf(cmd_buf, bake.pathtrace_output, bake.shared_buf_vk)
             gpu.cmd_barrier(cmd_buf, .All, .All)
         }
+
     }
 
+    when false
+    {
     cmd_buf := gpu.commands_begin(.Main)
     gpu.cmd_blit_texture(cmd_buf, bake.pathtrace_output, bake.tmp_tex,  { {} }, { {} }, .Linear)
     gpu.cmd_blit_texture(cmd_buf, bake.pathtrace_output, bake.lightmap, { {} }, { {} }, .Linear)
@@ -123,8 +139,8 @@ bake_iteration_impl :: proc(bake: ^Bake, frame_arena: ^gpu.Arena, instances: []I
         gpu.cmd_barrier(cmd_buf, .All, .All)
     }
 
-    bake.accum_counter = min(bake.max_samples, bake.accum_counter + 1)
     gpu.queue_submit(.Main, { cmd_buf })
+    }
 }
 
 LM_UVs :: struct
@@ -835,13 +851,14 @@ oidn_shared_buffer_from_vk_buffer :: proc(device: oidn.Device, buf: External_Buf
 oidn_run_lightmap_filter :: proc(device: oidn.Device, filter: oidn.Filter)
 {
     oidn.ExecuteFilter(filter)
-    oidn.SyncDevice(device)
+    // oidn.SyncDevice(device)
     oidn_check(device)
 }
 
 start_denoise_lightmap_filter :: proc(bake: ^Bake)
 {
     bake.denoise_done = false
+    if bake.denoise_thread != nil do thread.destroy(bake.denoise_thread)
     bake.denoise_thread = thread.create_and_start_with_poly_data(bake, proc(bake: ^Bake) {
         oidn_run_lightmap_filter(bake.ctx.oidn_device, bake.filter)
         intr.volatile_store(&bake.denoise_done, true)
