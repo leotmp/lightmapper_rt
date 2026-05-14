@@ -33,7 +33,7 @@ Bake_State :: enum
     Wait_For_Copy,  // Waiting for copy from pathtrace_output to the shader OIDN buffer.
 }
 
-bake_iteration_impl :: proc(bake: ^Bake, frame_arena: ^gpu.Arena, instances: []Instance, lights: Lights, fix_seams: bool)
+bake_iteration_impl :: proc(bake: ^Bake, frame_arena: ^gpu.Arena, instances: []Instance, lights: Lights, fix_seams: bool, denoise_on_preview: bool)
 {
     //if !fix_seams && bake.accum_counter >= bake.max_samples do return
 
@@ -41,7 +41,7 @@ bake_iteration_impl :: proc(bake: ^Bake, frame_arena: ^gpu.Arena, instances: []I
     bake.instances = slice.clone_to_dynamic(instances)
     bake.lights = lights
 
-    //resolution := [2]f32 { f32(bake.lightmap_size), f32(bake.lightmap_size) }
+    resolution := [2]f32 { f32(bake.lightmap_size), f32(bake.lightmap_size) }
     if bake.accum_counter < bake.max_samples
     {
         cmd_buf := gpu.commands_begin(.Main)
@@ -49,7 +49,8 @@ bake_iteration_impl :: proc(bake: ^Bake, frame_arena: ^gpu.Arena, instances: []I
         pathtrace(bake, cmd_buf, frame_arena, .Lightmap, {}, bake.pathtrace_output_rw_id, 4096, bake.accum_counter, bake.lights)  // TODO
         gpu.cmd_barrier(cmd_buf, .All, .All, {})  // TODO
 
-        if bake.accum_counter == 0 do bake.state = .Start
+        if bake.accum_counter == 0 || !denoise_on_preview do bake.state = .Start
+
         bake.accum_counter = min(bake.max_samples, bake.accum_counter + 1)
         next_counter := bake.bake_counter + 1
 
@@ -79,6 +80,15 @@ bake_iteration_impl :: proc(bake: ^Bake, frame_arena: ^gpu.Arena, instances: []I
 
                     oidn_copy_from_shared_buf(cmd_buf, bake.lightmap, bake.shared_buf_vk)
                     gpu.cmd_barrier(cmd_buf, .All, .All)
+
+                    // Dilate
+                    {
+                        gpu.cmd_blit_texture(cmd_buf, bake.lightmap, bake.tmp_tex,  { {} }, { {} }, .Linear)
+                        gpu.cmd_barrier(cmd_buf, .All, .All)
+
+                        dilate(bake, cmd_buf, frame_arena, resolution)
+                        gpu.cmd_barrier(cmd_buf, .All, .All)
+                    }
 
                     // gpu.cmd_blit_texture(cmd_buf, bake.pathtrace_output, bake.tmp_tex,  { {} }, { {} }, .Linear)
 

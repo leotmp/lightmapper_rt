@@ -436,7 +436,7 @@ handle_window_events :: proc(window: ^sdl.Window) -> (proceed: bool) {
 first_person_camera_view :: proc(delta_time: f32) -> matrix[4, 4]f32 {
 	@(static) cam_pos: [3]f32 = {-7.581631, 1.1906259, 0.25928685}
 
-	@(static) angle: [2]f32 = {1.570796, 0.3665192}
+	@(static) angle: [2]f32 = {1.570796, 0.3665192 * 0.3}
 
 	cam_rot: quaternion128 = 1
 

@@ -291,9 +291,14 @@ bake_reset :: proc(bake: ^Bake)
     bake.accum_counter = 0
 }
 
-bake_iteration :: proc(bake: ^Bake, frame_arena: ^gpu.Arena, instances: []Instance, lights: Lights, fix_seams: bool)
+bake_progress :: proc(bake: ^Bake) -> f32
 {
-    bake_iteration_impl(bake, frame_arena, instances, lights, fix_seams)
+    return f32(bake.accum_counter) / f32(bake.max_samples)
+}
+
+bake_iteration :: proc(bake: ^Bake, frame_arena: ^gpu.Arena, instances: []Instance, lights: Lights, fix_seams: bool, denoise_on_preview: bool)
+{
+    bake_iteration_impl(bake, frame_arena, instances, lights, fix_seams, denoise_on_preview)
 }
 
 bake_is_done :: proc(bake: ^Bake) -> bool

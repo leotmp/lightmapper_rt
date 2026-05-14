@@ -1,4 +1,6 @@
 
+#+vet !unused-variables
+
 package main
 
 import intr "base:intrinsics"
@@ -271,7 +273,6 @@ main :: proc()
     gbuf_world_normals_id := gpu.desc_pool_alloc_texture(&desc_pool, gpu.texture_view_descriptor(lm.bake_debug_get_gbuffer_world_normals(&bake), {}))
     lightmap_id := gpu.desc_pool_alloc_texture(&desc_pool, gpu.texture_view_descriptor(lightmap, {}))
 
-
     imgui_ctx := init_dear_imgui(window, &desc_pool)
     defer {
         imgui_impl_nogfx.shutdown()
@@ -356,7 +357,9 @@ main :: proc()
                 scale = {},
             })
         }
-        ui_update(&ui, draw_calls[:], { gbuf_world_pos_id, gbuf_world_normals_id, lightmap_id }, { "World Position", "World Normals", "Lightmap" })
+        ui_update(&ui, draw_calls[:], { gbuf_world_pos_id, gbuf_world_normals_id, lightmap_id }, { "World Position", "World Normals", "Lightmap" }, lm.bake_progress(&bake))
+        fmt.println(lm.bake_progress(&bake))
+        // ui_update_animation(&ui, delta_time)
 
         imgui.render()
 
@@ -382,7 +385,7 @@ main :: proc()
             lm.bake_reset(&bake)
             pathtrace_gt_counter = 0
         }
-        lm.bake_iteration(&bake, frame_arena, lm_instances, ui.lights, ui.fix_seams)
+        lm.bake_iteration(&bake, frame_arena, lm_instances, ui.lights, ui.fix_seams, ui.denoise)
 
         switch ui.output_type
         {
@@ -1100,8 +1103,8 @@ set_dear_imgui_font_and_style :: proc(dpi_scale: f32)
         colors[imgui.Col.Tab_Dimmed_Selected]      = { 0.14, 0.14, 0.14, 1.00 }
         colors[imgui.Col.Plot_Lines]              = { 1.00, 0.00, 0.00, 1.00 }
         colors[imgui.Col.Plot_Lines_Hovered]       = { 1.00, 0.00, 0.00, 1.00 }
-        colors[imgui.Col.Plot_Histogram]          = { 1.00, 0.00, 0.00, 1.00 }
-        colors[imgui.Col.Plot_Histogram_Hovered]   = { 1.00, 0.00, 0.00, 1.00 }
+        colors[imgui.Col.Plot_Histogram]         = { 0.33, 0.67, 0.86, 1.00 }
+        colors[imgui.Col.Plot_Histogram_Hovered] = { 0.40, 0.75, 0.95, 1.00 }
         colors[imgui.Col.Table_Header_Bg]          = { 0.00, 0.00, 0.00, 0.52 }
         colors[imgui.Col.Table_Border_Strong]      = { 0.00, 0.00, 0.00, 0.52 }
         colors[imgui.Col.Table_Border_Light]       = { 0.28, 0.28, 0.28, 0.29 }
@@ -1538,6 +1541,7 @@ UI_State :: struct
     lights: lm.Lights,
 
     do_reset_bake: bool,
+    denoise: bool,
 }
 
 make_ui_default :: proc() -> UI_State
@@ -1557,10 +1561,12 @@ make_ui_default :: proc() -> UI_State
 
     res.lights.sun_emission = { 68.0, 62.0, 62.0 }
     res.lights.sun_radius = math.RAD_PER_DEG * res.light_radius_deg
+
+    res.denoise = true
     return res
 }
 
-ui_update :: proc(ui: ^UI_State, debug_viz_draw_calls: []UV_Mesh_Draw_Call, texture_ids: []u32, texture_names: []cstring)
+ui_update :: proc(ui: ^UI_State, debug_viz_draw_calls: []UV_Mesh_Draw_Call, texture_ids: []u32, texture_names: []cstring, bake_progress: f32)
 {
     if imgui.begin_main_menu_bar()
     {
@@ -1640,6 +1646,12 @@ ui_update :: proc(ui: ^UI_State, debug_viz_draw_calls: []UV_Mesh_Draw_Call, text
                 }
             }
 
+            imgui.separator_text("Bake settings")
+            {
+                imgui.checkbox("Denoise", &ui.denoise)
+                imgui.progress_bar(bake_progress, size_arg = [2]f32 { SETTINGS_WIDTH, 0 })
+            }
+
             imgui.separator_text("Scene settings (require bake reset)")
             {
                 imgui.push_item_width(SETTINGS_WIDTH / 2)
@@ -1676,6 +1688,26 @@ ui_update :: proc(ui: ^UI_State, debug_viz_draw_calls: []UV_Mesh_Draw_Call, text
     {
         gui_show_debug_texture_window("Lightmap Viewer", texture_ids, texture_names, LM_SIZE, LM_SIZE, debug_viz_draw_calls, &ui.show_texture_viewer)
     }
+}
+
+// Used for social media posts.
+ui_update_animation :: proc(ui: ^UI_State, delta_time: f32)
+{
+    min_t := f32(0.0)
+    max_t := f32(5.0)
+    @(static) t := f32(0.0)
+    t = min(t + delta_time, max_t)
+
+    first_angle_x  := f32(-45.0)
+    second_angle_x := f32(60.0)
+
+    ease_in_out_cubic :: proc(t: f32) -> f32
+    {
+        return 4.0 * t * t * t if t < 0.5 else 1.0 - math.pow(-2.0 * t + 2.0, 3.0) / 2.0;
+    }
+
+    ui.light_azimuth = math.lerp(first_angle_x, second_angle_x, ease_in_out_cubic(max(0.0, t - min_t) / (max_t - min_t)))
+    ui.lights.sun_dir = dir_from_spherical_coords(math.RAD_PER_DEG * ui.light_azimuth, math.RAD_PER_DEG * ui.light_elevation)
 }
 
 dir_from_spherical_coords :: proc(azimuth: f32, elevation: f32) -> [3]f32
