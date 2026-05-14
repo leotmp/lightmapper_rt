@@ -65,7 +65,7 @@ main :: (data: ^Data @data, global_invocation_id: vec3 @global_invocation_id)
         start_ray: Ray;
         start_ray.ori = pos_sample.xyz + normal * 0.0011;
         start_ray.dir = -normal;
-        color = bake_texel(pos_sample.xyz, normal, data.scene, data.tlas, data.linear_sampler);
+        color = clamp_radiance(bake_texel(pos_sample.xyz, normal, data.scene, data.tlas, data.linear_sampler));
     }
     else
     {
@@ -130,7 +130,7 @@ bake_texel :: (world_pos: vec3, world_normal: vec3, scene: Scene, tlas: bvh_id, 
         ray: Ray;
         ray.ori = origin;
         ray.dir = incoming;
-        accum += clamp_radiance(pathtrace(ray, scene, tlas, sampler) * mis_weight);
+        accum += pathtrace(ray, scene, tlas, sampler) * mis_weight;
     }
 
     return accum / float(N);

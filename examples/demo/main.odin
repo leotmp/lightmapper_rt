@@ -358,7 +358,6 @@ main :: proc()
             })
         }
         ui_update(&ui, draw_calls[:], { gbuf_world_pos_id, gbuf_world_normals_id, lightmap_id }, { "World Position", "World Normals", "Lightmap" }, lm.bake_progress(&bake))
-        fmt.println(lm.bake_progress(&bake))
         // ui_update_animation(&ui, delta_time)
 
         imgui.render()
@@ -1173,6 +1172,9 @@ gui_show_debug_texture_window :: proc(name: cstring, texture_ids: []u32, texture
         pan  = {0, 0}
     }
 
+    @(static) show_uv_mesh: bool = true
+    imgui.checkbox("Show UV Mesh", &show_uv_mesh)
+
     @(static) item_selected_idx: int = 0
     combo_preview_value := texture_names[item_selected_idx]
     if imgui.begin_combo("Texture", combo_preview_value, {})
@@ -1348,24 +1350,27 @@ gui_show_debug_texture_window :: proc(name: cstring, texture_ids: []u32, texture
     }
 
     // Draw uvs
-    vp := imgui.get_main_viewport().size
-
-    for draw_call in uv_mesh_data
+    if show_uv_mesh
     {
-        tmp := draw_call
-        tmp.scale = {
-            tex_width  * zoom / vp.x * 2.0,
-            tex_height * zoom / vp.y * 2.0,
-        }
-        tmp.offset = {
-            img_p0.x / vp.x * 2.0 - 1.0,
-            img_p0.y / vp.y * 2.0 - 1.0,
-        }
-        imgui.draw_list_add_callback(draw_list, draw_uv_mesh_callback, &tmp, size_of(tmp))
-    }
-    imgui.draw_list_add_callback(draw_list, Callback_Reset_Render_State, nil)
+        vp := imgui.get_main_viewport().size
 
-    imgui.draw_list_pop_clip_rect(draw_list)
+        for draw_call in uv_mesh_data
+        {
+            tmp := draw_call
+            tmp.scale = {
+                tex_width  * zoom / vp.x * 2.0,
+                tex_height * zoom / vp.y * 2.0,
+            }
+            tmp.offset = {
+                img_p0.x / vp.x * 2.0 - 1.0,
+                img_p0.y / vp.y * 2.0 - 1.0,
+            }
+            imgui.draw_list_add_callback(draw_list, draw_uv_mesh_callback, &tmp, size_of(tmp))
+        }
+        imgui.draw_list_add_callback(draw_list, Callback_Reset_Render_State, nil)
+
+        imgui.draw_list_pop_clip_rect(draw_list)
+    }
 
     imgui.end()
 }

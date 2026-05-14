@@ -278,7 +278,7 @@ void main()
         normal_ = normalize(((normal_sample_ * 2.0) - 1.0).xyz);
         start_ray_.ori_ = (pos_sample_.xyz + (normal_ * 0.0011));
         start_ray_.dir_ = (-normal_);
-        color_ = bake_texel(pos_sample_.xyz, normal_, data_._res_.scene_, data_._res_.tlas_, data_._res_.linear_sampler_);
+        color_ = clamp_radiance(bake_texel(pos_sample_.xyz, normal_, data_._res_.scene_, data_._res_.tlas_, data_._res_.linear_sampler_));
     }
     else
     {
@@ -353,7 +353,7 @@ incoming_ = sample_lights(scene_.lights_, origin_, world_normal_, world_normal_)
             mis_weight_ = (cos_term_ / prob_);
             ray_.ori_ = origin_;
             ray_.dir_ = incoming_;
-            accum_ += clamp_radiance((pathtrace(ray_, scene_, tlas_, sampler_) * mis_weight_));
+            accum_ += (pathtrace(ray_, scene_, tlas_, sampler_) * mis_weight_);
         }
     }
 

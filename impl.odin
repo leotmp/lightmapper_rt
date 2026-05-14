@@ -22,6 +22,9 @@ import vk "vendor:vulkan"
 import "no_gfx_api/gpu"
 import oidn "../oidn_odin_bindings"
 
+DENOISE_TILE_SIZE :: 1024
+DENOISE_TILE_OVERLAP :: 32
+
 // NOTE: Unfortunately OIDN does not yet support GPU synchronization
 // (external semaphores), so we'll need to do synchronization on the CPU side.
 // Instead of waiting on the CPU on each iteration, we can keep path tracing
@@ -858,11 +861,52 @@ oidn_shared_buffer_from_vk_buffer :: proc(device: oidn.Device, buf: External_Buf
     else do #panic("Unsupported OS.")
 }
 
-oidn_run_lightmap_filter :: proc(device: oidn.Device, filter: oidn.Filter)
+oidn_run_lightmap_filter :: proc(device: oidn.Device, filter: oidn.Filter, color: oidn.Buffer, output: oidn.Buffer, lightmap_size: u32)
 {
-    oidn.ExecuteFilter(filter)
-    // oidn.SyncDevice(device)
-    oidn_check(device)
+    TILED :: true
+
+    bytes_per_pixel := u32(2 * 4)
+
+    when TILED
+    {
+        // Lots of stuff in OIDN to do to get tiled denoising to work...
+        for ty in 0..<(lightmap_size+DENOISE_TILE_SIZE)/DENOISE_TILE_SIZE
+        {
+            for tx in 0..<(lightmap_size+DENOISE_TILE_SIZE)/DENOISE_TILE_SIZE
+            {
+                inner_x0: int = int(tx * DENOISE_TILE_SIZE)
+                inner_y0: int = int(ty * DENOISE_TILE_SIZE)
+                inner_x1: int = clamp(inner_x0 + DENOISE_TILE_SIZE, 0, int(lightmap_size))
+                inner_y1: int = clamp(inner_y0 + DENOISE_TILE_SIZE, 0, int(lightmap_size))
+
+                t_x0 := clamp(inner_x0 - DENOISE_TILE_OVERLAP, 0, int(lightmap_size))
+                t_y0 := clamp(inner_y0 - DENOISE_TILE_OVERLAP, 0, int(lightmap_size))
+                t_x1 := clamp(inner_x1 + DENOISE_TILE_OVERLAP, 0, int(lightmap_size))
+                t_y1 := clamp(inner_y1 + DENOISE_TILE_OVERLAP, 0, int(lightmap_size))
+                tile_w := t_x1 - t_x0
+                tile_h := t_y1 - t_y0
+
+                byte_offset := (t_y0 * int(lightmap_size) + t_x0) * int(bytes_per_pixel)
+
+                oidn.SetFilterImage(filter, "color",  color,  .HALF3, uint(tile_w), uint(tile_h),
+                                    byteOffset = uint(byte_offset),
+                                    pixelByteStride = uint(bytes_per_pixel), rowByteStride = uint(bytes_per_pixel * lightmap_size))
+                oidn.SetFilterImage(filter, "output", output, .HALF3, uint(tile_w), uint(tile_h),
+                                    byteOffset = uint(byte_offset),
+                                    pixelByteStride = uint(bytes_per_pixel), rowByteStride = uint(bytes_per_pixel * lightmap_size))
+                oidn.CommitFilter(filter)
+                oidn_check(device)
+
+                oidn.ExecuteFilter(filter)
+                oidn_check(device)
+            }
+        }
+    }
+    else
+    {
+        oidn.ExecuteFilter(filter)
+        oidn_check(device)
+    }
 }
 
 start_denoise_lightmap_filter :: proc(bake: ^Bake)
@@ -870,7 +914,7 @@ start_denoise_lightmap_filter :: proc(bake: ^Bake)
     bake.denoise_done = false
     if bake.denoise_thread != nil do thread.destroy(bake.denoise_thread)
     bake.denoise_thread = thread.create_and_start_with_poly_data(bake, proc(bake: ^Bake) {
-        oidn_run_lightmap_filter(bake.ctx.oidn_device, bake.filter)
+        oidn_run_lightmap_filter(bake.ctx.oidn_device, bake.filter, bake.shared_buf_oidn, bake.shared_buf_oidn, bake.lightmap_size)
         intr.volatile_store(&bake.denoise_done, true)
     })
 }
@@ -878,9 +922,10 @@ start_denoise_lightmap_filter :: proc(bake: ^Bake)
 oidn_check :: proc(device: oidn.Device)
 {
     msg: cstring
-    if oidn.GetDeviceError(device, &msg) != .NONE
+    err := oidn.GetDeviceError(device, &msg)
+    if err != .NONE
     {
-        log.error(msg)
+        fmt.printfln("OIDN Error (%v): %v", err, msg)
         panic("")
     }
 }
@@ -888,7 +933,7 @@ oidn_check :: proc(device: oidn.Device)
 oidn_error_callback :: proc "c"(user_ptr: rawptr, code: oidn.Error, message: cstring)
 {
     context = runtime.default_context()
-    log.error(message)
+    fmt.printfln("OIDN Error (%v): %v", code, message)
 }
 
 oidn_copy_to_shared_buf :: proc(cmd_buf: gpu.Command_Buffer, dst: External_Buf, src: gpu.Texture)
@@ -956,6 +1001,14 @@ oidn_create_lightmap_filter :: proc(oidn_device: oidn.Device, color: oidn.Buffer
     oidn.SetFilterImage(filter, "color", color, .HALF3, auto_cast lightmap_size, auto_cast lightmap_size, pixelByteStride = 2 * 4)
     oidn.SetFilterImage(filter, "output", output, .HALF3, auto_cast lightmap_size, auto_cast lightmap_size, pixelByteStride = 2 * 4)
     oidn.SetFilterInt(filter, "quality", i32(quality))
+    oidn.SetFilterInt(filter, "tileAlignment", DENOISE_TILE_SIZE)
+    oidn.SetFilterInt(filter, "tileOverlap", DENOISE_TILE_OVERLAP)
+
+    // NOTE: value * inputScale == 1.0 -> 100cd/m^2.
+    // I think that should be close to standard HDR values with e.g. a filmic tonemapper,
+    // so I'll just put 1.0 for now. This is required because we're doing tiled denoising.
+    // Otherwise it would implicitly compute a different scale for each tile.
+    oidn.SetFilterFloat(filter, "inputScale", 1.0)
     oidn.CommitFilter(filter)
     oidn_check(oidn_device)
     return filter
