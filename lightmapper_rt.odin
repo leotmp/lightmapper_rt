@@ -11,7 +11,7 @@ import "core:log"
 import "core:thread"
 
 import "no_gfx_api/gpu"
-import oidn "../oidn_odin_bindings"
+import oidn "oidn_odin_bindings"
 
 Handle :: struct { idx: u32, gen: u32 }
 Mesh_Handle :: distinct Handle
@@ -174,6 +174,10 @@ Bake :: struct
     // OIDN
     shared_buf_vk: External_Buf,
     shared_buf_oidn: oidn.Buffer,
+    shared_sem_vk: External_Semaphore,
+    shared_sem_oidn: oidn.Semaphore,
+    shared_sem_nogfx: gpu.Semaphore,
+    test_value: u64,
     filter: oidn.Filter,
 
     accum_counter: u32,
@@ -203,82 +207,7 @@ Lights :: struct
 
 bake_begin :: proc(ctx: ^Context, #any_int lightmap_size: i64, samples: u32, lightmap: gpu.Texture, instances: []Instance, lights: Lights) -> Bake
 {
-    assert(lightmap_size > 0)
-
-    bake: Bake
-    bake.ctx = ctx
-    bake.gbufs = gbufs_create(lightmap_size)
-    bake.instances = slice.clone_to_dynamic(instances)
-    bake.lights = lights
-    bake.lightmap_size = u32(lightmap_size)
-    bake.lightmap = lightmap
-    bake.max_samples = samples
-    bake.bake_sem = gpu.semaphore_create()
-    bake.denoise_done = true
-
-    bake.lightmap_rw_id = gpu.desc_pool_alloc_texture_rw(ctx.desc_pool, gpu.texture_rw_view_descriptor(lightmap, {}))
-    bake.lightmap_id = gpu.desc_pool_alloc_texture(ctx.desc_pool, gpu.texture_view_descriptor(bake.lightmap, {}))
-
-    bake.pathtrace_output = gpu.texture_alloc_and_create({
-        format = .RGBA16_Float,
-        dimensions = { u32(lightmap_size), u32(lightmap_size), 1 },
-        usage = { .Sampled, .Storage, .Transfer_Src, .Color_Attachment }
-    })
-    bake.pathtrace_output_rw_id = gpu.desc_pool_alloc_texture_rw(ctx.desc_pool, gpu.texture_rw_view_descriptor(bake.pathtrace_output, {}))
-
-    bake.tmp_tex = gpu.texture_alloc_and_create({
-        format = .RGBA16_Float,
-        dimensions = { u32(lightmap_size), u32(lightmap_size), 1 },
-        usage = { .Sampled, .Storage, .Transfer_Src, .Color_Attachment }
-    })
-    bake.tmp_tex_id = gpu.desc_pool_alloc_texture(ctx.desc_pool, gpu.texture_view_descriptor(bake.tmp_tex, {}))
-    bake.tmp_tex_rw_id = gpu.desc_pool_alloc_texture_rw(ctx.desc_pool, gpu.texture_rw_view_descriptor(bake.tmp_tex, {}))
-
-    bake.shared_buf_vk = create_vk_external_buffer_for_oidn(u32(lightmap_size * lightmap_size * 2 * 4))  // TODO: What about other formats?
-    bake.shared_buf_oidn = oidn_shared_buffer_from_vk_buffer(ctx.oidn_device, bake.shared_buf_vk)
-    bake.filter = oidn_create_lightmap_filter(ctx.oidn_device, bake.shared_buf_oidn, bake.shared_buf_oidn, u32(lightmap_size), .HIGH)
-
-    cmd_buf := gpu.commands_begin(.Main)
-
-    meshes_gpu := gpu.arena_alloc(&ctx.upload_arena, Mesh_Shader, len(ctx.meshes.resources))
-    for &mesh, i in meshes_gpu.cpu {
-        mesh.positions = ctx.meshes.resources[i].info.positions.gpu.ptr
-        mesh.normals   = ctx.meshes.resources[i].info.normals.gpu.ptr
-        mesh.uvs       = ctx.meshes.resources[i].info.uvs.gpu.ptr
-        mesh.indices   = ctx.meshes.resources[i].info.indices.gpu.ptr
-    }
-    bake.scene_gpu.meshes_shader = gpu.mem_alloc(Mesh_Shader, len(ctx.meshes.resources), gpu.Memory.GPU)
-    gpu.cmd_mem_copy(cmd_buf, bake.scene_gpu.meshes_shader, meshes_gpu)
-
-    instances_gpu := gpu.arena_alloc(&ctx.upload_arena, Instance_Shader, len(instances))
-    for &instance, i in instances_gpu.cpu {
-        instance = {
-            mesh_idx = instances[i].mesh_handle.idx,
-            albedo_tex_id = instances[i].albedo_tex_id,
-        }
-    }
-    bake.scene_gpu.instances = gpu.mem_alloc(Instance_Shader, len(instances), gpu.Memory.GPU)
-    gpu.cmd_mem_copy(cmd_buf, bake.scene_gpu.instances, instances_gpu)
-    gpu.cmd_barrier(cmd_buf, .All, .All)
-
-    bake.scene_gpu.instances_bvh = upload_bvh_instances(&ctx.upload_arena, cmd_buf, instances, ctx.meshes.resources[:])
-    gpu.cmd_barrier(cmd_buf, .Transfer, .Build_BVH)
-    bake.scene_gpu.bvh = build_tlas(&ctx.upload_arena, cmd_buf, bake.scene_gpu.instances_bvh, u32(len(instances)))
-    gpu.cmd_barrier(cmd_buf, .Build_BVH, .All)
-
-    bake.scene_gpu.bvh_id = gpu.desc_pool_alloc_bvh(ctx.desc_pool, gpu.bvh_descriptor(bake.scene_gpu.bvh))
-
-    resolution := [2]f32 { f32(lightmap_size), f32(lightmap_size) }
-    gbufs_render(cmd_buf, &ctx.upload_arena, &bake.gbufs, ctx.shaders, instances, ctx.meshes.resources[:], ctx.lm_uvs.resources[:], resolution)
-    gpu.cmd_barrier(cmd_buf, .All, .All, {})
-
-    bake.gbufs_id = gpu.desc_pool_alloc_texture_rw(ctx.desc_pool, []gpu.Texture_Descriptor {
-        gpu.texture_rw_view_descriptor(bake.gbufs.world_pos, {}),
-        gpu.texture_rw_view_descriptor(bake.gbufs.world_normals, {}),
-    })
-
-    gpu.queue_submit(.Main, { cmd_buf })
-    return bake
+    return bake_begin_impl(ctx, lightmap_size, samples, lightmap, instances, lights)
 }
 
 bake_scene_changed :: proc(bake: ^Bake, instances: []Instance, lights: Lights) -> bool

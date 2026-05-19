@@ -20,7 +20,7 @@ import "core:thread"
 
 import vk "vendor:vulkan"
 import "no_gfx_api/gpu"
-import oidn "../oidn_odin_bindings"
+import oidn "oidn_odin_bindings"
 
 DENOISE_TILE_SIZE :: 1024
 DENOISE_TILE_OVERLAP :: 32
@@ -36,6 +36,90 @@ Bake_State :: enum
     Wait_For_Copy,  // Waiting for copy from pathtrace_output to the shader OIDN buffer.
 }
 
+bake_begin_impl :: proc(ctx: ^Context, #any_int lightmap_size: i64, samples: u32, lightmap: gpu.Texture, instances: []Instance, lights: Lights) -> Bake
+{
+    assert(lightmap_size > 0)
+
+    bake: Bake
+    bake.ctx = ctx
+    bake.gbufs = gbufs_create(lightmap_size)
+    bake.instances = slice.clone_to_dynamic(instances)
+    bake.lights = lights
+    bake.lightmap_size = u32(lightmap_size)
+    bake.lightmap = lightmap
+    bake.max_samples = samples
+    bake.bake_sem = gpu.semaphore_create()
+    bake.denoise_done = true
+
+    bake.lightmap_rw_id = gpu.desc_pool_alloc_texture_rw(ctx.desc_pool, gpu.texture_rw_view_descriptor(lightmap, {}))
+    bake.lightmap_id = gpu.desc_pool_alloc_texture(ctx.desc_pool, gpu.texture_view_descriptor(bake.lightmap, {}))
+
+    bake.pathtrace_output = gpu.texture_alloc_and_create({
+        format = .RGBA16_Float,
+        dimensions = { u32(lightmap_size), u32(lightmap_size), 1 },
+        usage = { .Sampled, .Storage, .Transfer_Src, .Color_Attachment }
+    })
+    bake.pathtrace_output_rw_id = gpu.desc_pool_alloc_texture_rw(ctx.desc_pool, gpu.texture_rw_view_descriptor(bake.pathtrace_output, {}))
+
+    bake.tmp_tex = gpu.texture_alloc_and_create({
+        format = .RGBA16_Float,
+        dimensions = { u32(lightmap_size), u32(lightmap_size), 1 },
+        usage = { .Sampled, .Storage, .Transfer_Src, .Color_Attachment }
+    })
+    bake.tmp_tex_id = gpu.desc_pool_alloc_texture(ctx.desc_pool, gpu.texture_view_descriptor(bake.tmp_tex, {}))
+    bake.tmp_tex_rw_id = gpu.desc_pool_alloc_texture_rw(ctx.desc_pool, gpu.texture_rw_view_descriptor(bake.tmp_tex, {}))
+
+    bake.shared_buf_vk = create_vk_external_buffer_for_oidn(u32(lightmap_size * lightmap_size * 2 * 4))  // TODO: What about other formats?
+    bake.shared_buf_oidn = oidn_shared_buffer_from_vk_buffer(ctx.oidn_device, bake.shared_buf_vk)
+    bake.shared_sem_vk = create_vk_external_semaphore_for_oidn()
+    bake.shared_sem_oidn = oidn_shared_semaphore_from_vk_semaphore(ctx.oidn_device, bake.shared_sem_vk)
+    bake.shared_sem_nogfx = gpu.vk_move_semaphore(bake.shared_sem_vk.vk_sem)
+    bake.filter = oidn_create_lightmap_filter(ctx.oidn_device, bake.shared_buf_oidn, bake.shared_buf_oidn, u32(lightmap_size), .HIGH)
+
+    cmd_buf := gpu.commands_begin(.Main)
+
+    meshes_gpu := gpu.arena_alloc(&ctx.upload_arena, Mesh_Shader, len(ctx.meshes.resources))
+    for &mesh, i in meshes_gpu.cpu {
+        mesh.positions = ctx.meshes.resources[i].info.positions.gpu.ptr
+        mesh.normals   = ctx.meshes.resources[i].info.normals.gpu.ptr
+        mesh.uvs       = ctx.meshes.resources[i].info.uvs.gpu.ptr
+        mesh.indices   = ctx.meshes.resources[i].info.indices.gpu.ptr
+    }
+    bake.scene_gpu.meshes_shader = gpu.mem_alloc(Mesh_Shader, len(ctx.meshes.resources), gpu.Memory.GPU)
+    gpu.cmd_mem_copy(cmd_buf, bake.scene_gpu.meshes_shader, meshes_gpu)
+
+    instances_gpu := gpu.arena_alloc(&ctx.upload_arena, Instance_Shader, len(instances))
+    for &instance, i in instances_gpu.cpu {
+        instance = {
+            mesh_idx = instances[i].mesh_handle.idx,
+            albedo_tex_id = instances[i].albedo_tex_id,
+        }
+    }
+    bake.scene_gpu.instances = gpu.mem_alloc(Instance_Shader, len(instances), gpu.Memory.GPU)
+    gpu.cmd_mem_copy(cmd_buf, bake.scene_gpu.instances, instances_gpu)
+    gpu.cmd_barrier(cmd_buf, .All, .All)
+
+    bake.scene_gpu.instances_bvh = upload_bvh_instances(&ctx.upload_arena, cmd_buf, instances, ctx.meshes.resources[:])
+    gpu.cmd_barrier(cmd_buf, .Transfer, .Build_BVH)
+    bake.scene_gpu.bvh = build_tlas(&ctx.upload_arena, cmd_buf, bake.scene_gpu.instances_bvh, u32(len(instances)))
+    gpu.cmd_barrier(cmd_buf, .Build_BVH, .All)
+
+    bake.scene_gpu.bvh_id = gpu.desc_pool_alloc_bvh(ctx.desc_pool, gpu.bvh_descriptor(bake.scene_gpu.bvh))
+
+    resolution := [2]f32 { f32(lightmap_size), f32(lightmap_size) }
+    gbufs_render(cmd_buf, &ctx.upload_arena, &bake.gbufs, ctx.shaders, instances, ctx.meshes.resources[:], ctx.lm_uvs.resources[:], resolution)
+    gpu.cmd_barrier(cmd_buf, .All, .All, {})
+
+    bake.gbufs_id = gpu.desc_pool_alloc_texture_rw(ctx.desc_pool, []gpu.Texture_Descriptor {
+        gpu.texture_rw_view_descriptor(bake.gbufs.world_pos, {}),
+        gpu.texture_rw_view_descriptor(bake.gbufs.world_normals, {}),
+    })
+
+    gpu.queue_submit(.Main, { cmd_buf })
+    return bake
+}
+
+/*
 bake_iteration_impl :: proc(bake: ^Bake, frame_arena: ^gpu.Arena, instances: []Instance, lights: Lights, fix_seams: bool, denoise_on_preview: bool)
 {
     //if !fix_seams && bake.accum_counter >= bake.max_samples do return
@@ -153,6 +237,61 @@ bake_iteration_impl :: proc(bake: ^Bake, frame_arena: ^gpu.Arena, instances: []I
     }
 
     gpu.queue_submit(.Main, { cmd_buf })
+    }
+}
+*/
+
+bake_iteration_impl :: proc(bake: ^Bake, frame_arena: ^gpu.Arena, instances: []Instance, lights: Lights, fix_seams: bool, denoise_on_preview: bool)
+{
+    //if !fix_seams && bake.accum_counter >= bake.max_samples do return
+
+    delete(bake.instances)
+    bake.instances = slice.clone_to_dynamic(instances)
+    bake.lights = lights
+
+    //resolution := [2]f32 { f32(bake.lightmap_size), f32(bake.lightmap_size) }
+    if bake.accum_counter < bake.max_samples
+    {
+        {
+            cmd_buf := gpu.commands_begin(.Main)
+            gpu.cmd_barrier(cmd_buf, .All, .All, {})  // TODO
+            pathtrace(bake, cmd_buf, frame_arena, .Lightmap, {}, bake.pathtrace_output_rw_id, 4096, bake.accum_counter, bake.lights)  // TODO
+            gpu.cmd_barrier(cmd_buf, .All, .All, {})  // TODO
+
+            oidn_copy_to_shared_buf(cmd_buf, bake.shared_buf_vk, bake.pathtrace_output)
+            gpu.cmd_barrier(cmd_buf, .All, .All, {})  // TODO
+
+            bake.accum_counter = min(bake.max_samples, bake.accum_counter + 1)
+            if bake.test_value > 0 {
+                gpu.cmd_add_wait_semaphore(cmd_buf, bake.shared_sem_nogfx, bake.test_value)
+            }
+            bake.test_value += 1
+            gpu.cmd_add_signal_semaphore(cmd_buf, bake.shared_sem_nogfx, bake.test_value)
+
+            bake.bake_counter += 1
+            gpu.cmd_add_signal_semaphore(cmd_buf, bake.bake_sem, bake.bake_counter)
+            gpu.queue_submit(.Main, { cmd_buf })
+        }
+
+        // Test external semaphores
+        oidn.WaitSemaphoresAsync(bake.ctx.oidn_device, &bake.shared_sem_oidn, &bake.test_value, nil, 1)
+
+        oidn_run_lightmap_filter(bake.ctx.oidn_device, bake.filter, bake.shared_buf_oidn, bake.shared_buf_oidn, bake.lightmap_size)
+
+        bake.test_value += 1
+        oidn.SignalSemaphoresAsync(bake.ctx.oidn_device, &bake.shared_sem_oidn, &bake.test_value, 1)
+
+        {
+            cmd_buf := gpu.commands_begin(.Main)
+
+            oidn_copy_from_shared_buf(cmd_buf, bake.lightmap, bake.shared_buf_vk)
+            gpu.cmd_barrier(cmd_buf, .All, .All)
+
+            gpu.cmd_add_wait_semaphore(cmd_buf, bake.shared_sem_nogfx, bake.test_value)
+            bake.test_value += 1
+            gpu.cmd_add_signal_semaphore(cmd_buf, bake.shared_sem_nogfx, bake.test_value)
+            gpu.queue_submit(.Main, { cmd_buf })
+        }
     }
 }
 
@@ -863,12 +1002,12 @@ oidn_shared_buffer_from_vk_buffer :: proc(device: oidn.Device, buf: External_Buf
 
 oidn_run_lightmap_filter :: proc(device: oidn.Device, filter: oidn.Filter, color: oidn.Buffer, output: oidn.Buffer, lightmap_size: u32)
 {
-    TILED :: true
-
-    bytes_per_pixel := u32(2 * 4)
+    TILED :: false
 
     when TILED
     {
+        bytes_per_pixel := u32(2 * 4)
+
         // Lots of stuff in OIDN to do to get tiled denoising to work...
         for ty in 0..<(lightmap_size+DENOISE_TILE_SIZE)/DENOISE_TILE_SIZE
         {
@@ -904,11 +1043,12 @@ oidn_run_lightmap_filter :: proc(device: oidn.Device, filter: oidn.Filter, color
     }
     else
     {
-        oidn.ExecuteFilter(filter)
+        oidn.ExecuteFilterAsync(filter)
         oidn_check(device)
     }
 }
 
+/*
 start_denoise_lightmap_filter :: proc(bake: ^Bake)
 {
     bake.denoise_done = false
@@ -918,6 +1058,7 @@ start_denoise_lightmap_filter :: proc(bake: ^Bake)
         intr.volatile_store(&bake.denoise_done, true)
     })
 }
+*/
 
 oidn_check :: proc(device: oidn.Device)
 {
@@ -1012,6 +1153,75 @@ oidn_create_lightmap_filter :: proc(oidn_device: oidn.Device, color: oidn.Buffer
     oidn.CommitFilter(filter)
     oidn_check(oidn_device)
     return filter
+}
+
+External_Semaphore :: struct
+{
+    vk_sem: vk.Semaphore,
+    win_handle: vk.HANDLE,
+    linux_handle: c.int,
+}
+
+create_vk_external_semaphore_for_oidn :: proc() -> External_Semaphore
+{
+    vk_device := gpu.vk_get_device()
+    res: External_Semaphore
+
+    next: rawptr
+    next = &vk.ExportSemaphoreCreateInfo {
+        sType = .EXPORT_SEMAPHORE_CREATE_INFO,
+        pNext = next,
+        handleTypes = { .OPAQUE_WIN32 },
+    }
+    next = &vk.SemaphoreTypeCreateInfo {
+        sType = .SEMAPHORE_TYPE_CREATE_INFO,
+        pNext = next,
+        semaphoreType = .TIMELINE,
+        initialValue = 0,
+    }
+    sem_ci := vk.SemaphoreCreateInfo {
+        sType = .SEMAPHORE_CREATE_INFO,
+        pNext = next
+    }
+    vk_check(vk.CreateSemaphore(vk_device, &sem_ci, nil, &res.vk_sem))
+
+    when ODIN_OS == .Windows
+    {
+        info := vk.SemaphoreGetWin32HandleInfoKHR {
+            sType = .SEMAPHORE_GET_WIN32_HANDLE_INFO_KHR,
+            semaphore = res.vk_sem,
+            handleType = { .OPAQUE_WIN32 }
+        }
+        vk_check(vk.GetSemaphoreWin32HandleKHR(vk_device, &info, &res.win_handle))
+    }
+    else when ODIN_OS == .Linux
+    {
+        info := vk.SemaphoreGetFdInfoKHR {
+            sType = .SEMAPHORE_GET_FD_INFO_KHR,
+            semaphore = res.vk_sem,
+            handleType = { .OPAQUE_FD }
+        }
+        vk_check(vk.GetSemaphoreFdKHR(vk_device, &info, &res.linux_handle))
+    }
+
+    return res
+}
+
+oidn_shared_semaphore_from_vk_semaphore :: proc(device: oidn.Device, sem: External_Semaphore) -> oidn.Semaphore
+{
+    res: oidn.Semaphore
+    when ODIN_OS == .Windows
+    {
+        res = oidn.NewSharedSemaphoreFromWin32Handle(device, { .OPAQUE_WIN32 }, sem.win_handle, nil)
+    }
+    else when ODIN_OS == .Linux
+    {
+        res = oidn.NewSharedSemaphoreFromFD(device, { .TIMELINE_SEMAPHORE_FD }, sem.linux_handle)
+    }
+    else do #panic("Unsupported OS.")
+
+    oidn_check(device)
+    return res
 }
 
 // Pool data type
