@@ -1,11 +1,11 @@
 
 Output :: struct
 {
-    world_pos: vec4 @output(0),  // Alpha holds world texel size.
-    world_normal: vec4 @output(1),
+    world_pos: vec4 @io(0),  // Alpha holds world texel size.
+    world_normal: vec4 @io(1),
 }
 
-main :: (world_pos: vec3 @input(0), world_normal: vec3 @input(1), uv: vec2 @input(2)) -> Output
+main :: (world_pos: vec3 @io(0), world_normal: vec3 @io(1), uv: vec2 @io(2)) -> Output
 {
     // Approximate texel world size using derivatives. Assuming
     // there is no heavy distortion on lightmap uvs.

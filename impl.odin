@@ -61,7 +61,7 @@ bake_iteration_impl :: proc(bake: ^Bake, frame_arena: ^gpu.Arena, instances: []I
         {
             case .Start:
             {
-                gpu.cmd_blit_texture(cmd_buf, bake.pathtrace_output, bake.lightmap,  { {} }, { {} }, .Linear)
+                gpu.cmd_blit_texture(cmd_buf, bake.lightmap, {}, bake.pathtrace_output, {}, .Linear)
                 if bake.accum_counter >= 10
                 {
                     oidn_copy_to_shared_buf(cmd_buf, bake.shared_buf_vk, bake.pathtrace_output)
@@ -86,14 +86,14 @@ bake_iteration_impl :: proc(bake: ^Bake, frame_arena: ^gpu.Arena, instances: []I
 
                     // Dilate
                     {
-                        gpu.cmd_blit_texture(cmd_buf, bake.lightmap, bake.tmp_tex,  { {} }, { {} }, .Linear)
+                        gpu.cmd_blit_texture(cmd_buf, bake.tmp_tex, {}, bake.lightmap, {}, .Linear)
                         gpu.cmd_barrier(cmd_buf, .All, .All)
 
                         dilate(bake, cmd_buf, frame_arena, resolution)
                         gpu.cmd_barrier(cmd_buf, .All, .All)
                     }
 
-                    // gpu.cmd_blit_texture(cmd_buf, bake.pathtrace_output, bake.tmp_tex,  { {} }, { {} }, .Linear)
+                    // gpu.cmd_blit_texture(cmd_buf, bake.tmp_tex, {}, bake.pathtrace_output, {}, .Linear)
 
                     oidn_copy_to_shared_buf(cmd_buf, bake.shared_buf_vk, bake.pathtrace_output)
                     gpu.cmd_barrier(cmd_buf, .All, .All)
@@ -385,7 +385,7 @@ pathtrace :: proc(bake: ^Bake, cmd_buf: gpu.Command_Buffer, frame_arena: ^gpu.Ar
     }
 
     gpu.cmd_set_compute_shader(cmd_buf, bake.ctx.shaders.pathtrace)
-    gpu.cmd_set_desc_pool(cmd_buf, bake.ctx.desc_pool^)
+    gpu.cmd_set_desc_heap(cmd_buf, bake.ctx.desc_pool^)
 
     num_groups_x := (u32(resolution.x) + 8 - 1) / 8
     num_groups_y := (u32(resolution.y) + 8 - 1) / 8
@@ -616,7 +616,7 @@ smooth_seams :: proc(bake: ^Bake, cmd_buf: gpu.Command_Buffer, frame_arena: ^gpu
                     dst_alpha_factor = .One_Minus_Src_Alpha,
                     color_write_mask = gpu.Color_Components_All,
                 })
-                gpu.cmd_set_desc_pool(cmd_buf, bake.ctx.desc_pool^)
+                gpu.cmd_set_desc_heap(cmd_buf, bake.ctx.desc_pool^)
 
                 // Render the entire scene
                 for instance in instances
@@ -672,7 +672,7 @@ dilate :: proc(bake: ^Bake, cmd_buf: gpu.Command_Buffer, frame_arena: ^gpu.Arena
         output = bake.lightmap_rw_id,
         input = bake.tmp_tex_rw_id,
     }
-    gpu.cmd_set_desc_pool(cmd_buf, bake.ctx.desc_pool^)
+    gpu.cmd_set_desc_heap(cmd_buf, bake.ctx.desc_pool^)
 
     num_groups_x := (u32(resolution.x) + 8 - 1) / 8
     num_groups_y := (u32(resolution.y) + 8 - 1) / 8

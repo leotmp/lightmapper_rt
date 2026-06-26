@@ -266,13 +266,13 @@ bake_begin :: proc(ctx: ^Context, #any_int lightmap_size: i64, samples: u32, lig
     bake.scene_gpu.bvh = build_tlas(&ctx.upload_arena, cmd_buf, bake.scene_gpu.instances_bvh, u32(len(instances)))
     gpu.cmd_barrier(cmd_buf, .Build_BVH, .All)
 
-    bake.scene_gpu.bvh_id = gpu.desc_pool_alloc_bvh(ctx.desc_pool, gpu.bvh_descriptor(bake.scene_gpu.bvh))
+    bake.scene_gpu.bvh_id = gpu.desc_pool_alloc_bvh(ctx.desc_pool, bake.scene_gpu.bvh)
 
     resolution := [2]f32 { f32(lightmap_size), f32(lightmap_size) }
     gbufs_render(cmd_buf, &ctx.upload_arena, &bake.gbufs, ctx.shaders, instances, ctx.meshes.resources[:], ctx.lm_uvs.resources[:], resolution)
     gpu.cmd_barrier(cmd_buf, .All, .All, {})
 
-    bake.gbufs_id = gpu.desc_pool_alloc_texture_rw(ctx.desc_pool, []gpu.Texture_Descriptor {
+    bake.gbufs_id = gpu.desc_pool_alloc_textures_rw(ctx.desc_pool, []gpu.Texture_Descriptor {
         gpu.texture_rw_view_descriptor(bake.gbufs.world_pos, {}),
         gpu.texture_rw_view_descriptor(bake.gbufs.world_normals, {}),
     })

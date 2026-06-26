@@ -1,6 +1,3 @@
-
-#+vet !unused-imports
-
 package shared
 
 import "base:runtime"
@@ -13,13 +10,11 @@ import "core:mem"
 import "core:slice"
 import "gltf2"
 import "core:image"
-import "core:image/png"
 import "core:image/jpeg"
+import "core:image/png"
 import intr "base:intrinsics"
 
 import sdl "vendor:sdl3"
-
-MISSING_TEXTURE_ID :: 0
 
 Texture_Type :: enum {
 	Base_Color,
@@ -433,11 +428,9 @@ handle_window_events :: proc(window: ^sdl.Window) -> (proceed: bool) {
 	return
 }
 
-first_person_camera_view :: proc(delta_time: f32) -> matrix[4, 4]f32 {
-	@(static) cam_pos: [3]f32 = {-7.581631, 1.1906259, 0.25928685}
-
-	@(static) angle: [2]f32 = {1.570796, 0.3665192 * 0.3}
-
+CAM_POS: [3]f32
+CAM_ANGLE: [2]f32
+first_person_camera_view :: proc(delta_time: f32) -> (matrix[4, 4]f32) {
 	cam_rot: quaternion128 = 1
 
 	mouse_sensitivity := math.to_radians_f32(0.2) // Radians per pixel
@@ -447,15 +440,15 @@ first_person_camera_view :: proc(delta_time: f32) -> matrix[4, 4]f32 {
 		mouse.y = INPUT.mouse_dy * mouse_sensitivity
 	}
 
-	angle += mouse
+	CAM_ANGLE += mouse
 
-	// Wrap angle.x
-	for angle.x < 0 do angle.x += 2 * math.PI
-	for angle.x > 2 * math.PI do angle.x -= 2 * math.PI
+	// Wrap CAM_ANGLE.x
+	for CAM_ANGLE.x < 0 do CAM_ANGLE.x += 2 * math.PI
+	for CAM_ANGLE.x > 2 * math.PI do CAM_ANGLE.x -= 2 * math.PI
 
-	angle.y = clamp(angle.y, math.to_radians_f32(-90), math.to_radians_f32(90))
-	y_rot := linalg.quaternion_angle_axis(angle.y, [3]f32{-1, 0, 0})
-	x_rot := linalg.quaternion_angle_axis(angle.x, [3]f32{0, 1, 0})
+	CAM_ANGLE.y = clamp(CAM_ANGLE.y, math.to_radians_f32(-90), math.to_radians_f32(90))
+	y_rot := linalg.quaternion_angle_axis(CAM_ANGLE.y, [3]f32{-1, 0, 0})
+	x_rot := linalg.quaternion_angle_axis(CAM_ANGLE.x, [3]f32{0, 1, 0})
 	cam_rot = x_rot * y_rot
 
 	// Movement
@@ -487,9 +480,9 @@ first_person_camera_view :: proc(delta_time: f32) -> matrix[4, 4]f32 {
 	target_vel.y += keyboard_dir_y * move_speed
 
 	cur_vel = approach_linear(cur_vel, target_vel, move_accel * delta_time)
-	cam_pos += cur_vel * delta_time
+	CAM_POS += cur_vel * delta_time
 
-	return world_to_view_mat(cam_pos, cam_rot)
+	return world_to_view_mat(CAM_POS, cam_rot)
 
 	approach_linear :: proc(cur: [3]f32, target: [3]f32, delta: f32) -> [3]f32 {
 		diff := target - cur
@@ -557,6 +550,7 @@ buffer_slice_with_stride :: proc(
 
 load_scene_gltf :: proc(
 	contents: []byte,
+	missing_texture_id: u32,
 ) -> (
 	Scene,
 	[]Gltf_Texture_Info,
@@ -576,7 +570,7 @@ load_scene_gltf :: proc(
 
 	texture_infos: [dynamic]Gltf_Texture_Info
 
-	log.info(fmt.tprintf("Collecting texture info from %v textures in GLTF", len(data.textures)))
+	log.infof("Collecting texture info from %v textures in GLTF", len(data.textures))
 
 	// Build a map from texture index to image index for quick lookup
 	texture_to_image: map[int]int
@@ -585,19 +579,17 @@ load_scene_gltf :: proc(
 		if texture.source != nil {
 			image_idx := texture.source.?
 			if int(image_idx) >= len(data.images) {
-				log.error(
-					fmt.tprintf(
-						"Texture %v references invalid image index %v (only %v images available)",
-						i,
-						image_idx,
-						len(data.images),
-					),
+				log.errorf(
+					"Texture %v references invalid image index %v (only %v images available)",
+					i,
+					image_idx,
+					len(data.images),
 				)
 				continue
 			}
 			texture_to_image[i] = int(image_idx)
 		} else {
-			log.info(fmt.tprintf("Texture %v has no source, skipping", i))
+			log.infof("Texture %v has no source, skipping", i)
 		}
 	}
 
@@ -605,10 +597,10 @@ load_scene_gltf :: proc(
 	meshes: [dynamic]Mesh
 	start_idx: [dynamic]u32
 	defer delete(start_idx)
-	for mesh in data.meshes {
+	for mesh, i in data.meshes {
 		append(&start_idx, u32(len(meshes)))
 
-		for primitive in mesh.primitives {
+		for primitive, j in mesh.primitives {
 			assert(primitive.mode == .Triangles)
 
 			positions := buffer_slice_with_stride(
@@ -655,9 +647,9 @@ load_scene_gltf :: proc(
 			}
 
 			mesh_idx := u32(len(meshes))
-			base_color_map: u32 = MISSING_TEXTURE_ID
-			metallic_roughness_map: u32 = MISSING_TEXTURE_ID
-			normal_map: u32 = MISSING_TEXTURE_ID
+			base_color_map: u32 = missing_texture_id
+			metallic_roughness_map: u32 = missing_texture_id
+			normal_map: u32 = missing_texture_id
 
 			if primitive.material != nil {
 				material_idx := primitive.material.?
@@ -709,9 +701,6 @@ load_scene_gltf :: proc(
 				}
 			}
 
-			// Convert vec3 to vec4 (adding w=0 component)
-			//pos_final := to_vec4_array(positions, allocator = context.temp_allocator)
-			//normals_final := to_vec4_array(normals, allocator = context.temp_allocator)
 			// Use TEXCOORD_0 if available, otherwise create default UVs
 			uvs_final: [][2]f32
 			if len(uvs) > 0 {
@@ -719,7 +708,7 @@ load_scene_gltf :: proc(
 			} else {
 				// Create default UVs if not present
 				uvs_final = make([][2]f32, len(positions), allocator = context.temp_allocator)
-				for &uv in uvs_final {
+				for &uv, i in uvs_final {
 					uv = {0.0, 0.0}
 				}
 			}
@@ -740,6 +729,8 @@ load_scene_gltf :: proc(
 	// Load instances
 	instances: [dynamic]Instance
 	for node_idx in data.scenes[0].nodes {
+		node := data.nodes[node_idx]
+
 		traverse_node(&instances, data, 1, int(node_idx), meshes, start_idx)
 
 		traverse_node :: proc(
@@ -760,7 +751,7 @@ load_scene_gltf :: proc(
 				mesh_idx := node.mesh.?
 				mesh := data.meshes[mesh_idx]
 
-				for j in 0..<len(mesh.primitives) {
+				for primitive, j in mesh.primitives {
 					primitive_idx := start_idx[mesh_idx] + u32(j)
 					instance := Instance {
 						transform = flip_z * transform,
@@ -809,7 +800,7 @@ load_texture_from_gltf :: proc(
 		case []byte:
 			image_bytes = v
 		case string:
-			log.error(fmt.tprintf("String URIs not supported for texture loading: %v", v))
+			log.errorf("String URIs not supported for texture loading: %v", v)
 			panic("String URIs not supported for texture loading")
 		case:
 			log.error("Image has neither buffer_view nor valid URI")
@@ -825,12 +816,10 @@ load_texture_from_gltf :: proc(
 	options := image.Options{.alpha_add_if_missing}
 	img, err := image.load_from_bytes(image_bytes, options)
 	if err != nil {
-		log.error(
-			fmt.tprintf(
-				"Failed to load image from bytes: %v, image size: %v bytes",
-				err,
-				len(image_bytes),
-			),
+		log.errorf(
+			"Failed to load image from bytes: %v, image size: %v bytes",
+			err,
+			len(image_bytes),
 		)
 		panic("Could not load texture from GLTF image.")
 	}
@@ -869,4 +858,65 @@ transform_to_gpu_transform :: proc(transform: matrix[4, 4]f32) -> [12]f32 {
 	transform_row_major := intr.transpose(transform)
 	flattened := linalg.matrix_flatten(transform_row_major)
 	return [12]f32 { flattened[0], flattened[1], flattened[2], flattened[3], flattened[4], flattened[5], flattened[6], flattened[7], flattened[8], flattened[9], flattened[10], flattened[11], }
+}
+
+// Basic meshes
+
+build_sphere :: proc(radius: f32 = 0.5, lat_segments := 32, lon_segments := 32) -> (verts: [dynamic][3]f32, indices: [dynamic]u32)
+{
+    // Generate verts
+    for lat in 0..=lat_segments
+    {
+        theta := math.PI * f32(lat) / f32(lat_segments)
+        sin_theta := math.sin(theta)
+        cos_theta := math.cos(theta)
+
+        for lon in 0..=lon_segments
+        {
+            phi := 2.0 * math.PI * f32(lon) / f32(lon_segments)
+
+			vert: [3]f32
+            vert.x = radius * sin_theta * math.cos(phi)
+            vert.y = radius * cos_theta
+            vert.z = radius * sin_theta * math.sin(phi)
+            append(&verts, vert)
+        }
+    }
+
+    // Generate indices
+    stride := lon_segments + 1
+    for lat in 0..<lat_segments
+    {
+        for lon in 0..<lon_segments
+        {
+            a := lat * stride + lon
+            b := a + stride
+            c := a + 1
+            d := b + 1
+
+            append(&indices, u32(a), u32(b), u32(c))
+            append(&indices, u32(c), u32(b), u32(d))
+        }
+    }
+
+    return verts, indices
+}
+
+UNIT_CUBE_VERTS := [][3]f32{
+    {-0.5, -0.5, -0.5},
+    { 0.5, -0.5, -0.5},
+    { 0.5,  0.5, -0.5},
+    {-0.5,  0.5, -0.5},
+    {-0.5, -0.5,  0.5},
+    { 0.5, -0.5,  0.5},
+    { 0.5,  0.5,  0.5},
+    {-0.5,  0.5,  0.5},
+}
+CUBE_INDICES := []u32{
+    4, 6, 5, 4, 7, 6, // Front (+Z)
+    1, 3, 0, 1, 2, 3, // Back (-Z)
+    0, 7, 4, 0, 3, 7, // Left (-X)
+    5, 2, 1, 5, 6, 2, // Right (+X)
+    3, 6, 7, 3, 2, 6, // Top (+Y)
+    0, 5, 1, 0, 4, 5, // Bottom (-Y)
 }
