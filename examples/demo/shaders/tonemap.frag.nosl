@@ -6,7 +6,7 @@ Data :: struct
     exposure: float,
 }
 
-main :: (uv: vec2 @input(0), data: ^Data @data) -> vec4 @output(0)
+main :: (uv: vec2 @io(0), data: ^Data @data) -> vec4 @io(0)
 {
     linear := texture_sample(data.texture_id, data.sampler_id, uv);
     if data.exposure != 0 {
