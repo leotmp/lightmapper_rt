@@ -1,5 +1,5 @@
 
-main :: () -> vec4 @output(0)
+main :: () -> vec4 @io(0)
 {
     return vec4(1, 1, 1, 0.5);
 }

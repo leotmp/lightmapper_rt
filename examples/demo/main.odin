@@ -50,7 +50,6 @@ mutex: sync.Mutex
 loaded_textures: [dynamic]gpu.Owned_Texture
 // Enables asynchronous cancellation of texture loading
 cancel_loading_textures: bool
-next_texture_idx: u32 = shared.MISSING_TEXTURE_ID + 1
 // Cache for image_index -> texture mapping, reused across texture loading chunks
 image_to_texture: map[int]struct {
     texture:     gpu.Owned_Texture,
@@ -136,7 +135,11 @@ main :: proc()
     desc_pool := gpu.desc_pool_create()
     defer gpu.desc_pool_destroy(&desc_pool)
 
-    gltf_scene, texture_infos, gltf_data := shared.load_scene_gltf(Sponza_Scene)
+    magenta_texture := create_magenta_texture(&upload_arena, upload_cmd_buf)
+    defer gpu.texture_free_and_destroy(&magenta_texture)
+    magenta_texture_id := gpu.desc_pool_alloc_texture(&desc_pool, gpu.texture_view_descriptor(magenta_texture, {}))
+
+    gltf_scene, texture_infos, gltf_data := shared.load_scene_gltf(Sponza_Scene, magenta_texture_id)
     defer {
         shared.destroy_scene(&gltf_scene)
         gltf2.unload(gltf_data)
@@ -205,7 +208,7 @@ main :: proc()
         }
 
         _, num_async_worker_threads, ok_cpu := info.cpu_core_count()
-		ensure(ok_cpu)
+        ensure(ok_cpu)
         for i := 0; i < num_async_worker_threads; i += 1 {
             texture_loader_thread := thread.create(texture_loader_thread_proc)
             texture_loader_thread.data = &loader_data
@@ -346,7 +349,7 @@ main :: proc()
 
         cmd_buf := gpu.commands_begin(.Main)
 
-        gpu.cmd_set_desc_pool(cmd_buf, desc_pool)
+        gpu.cmd_set_desc_heap(cmd_buf, desc_pool)
 
         draw_calls := make([dynamic]UV_Mesh_Draw_Call, allocator = context.temp_allocator)
         for mesh_idx in 0..<len(scene.meshes) {
@@ -366,7 +369,7 @@ main :: proc()
 
         imgui.render()
 
-        gpu.cmd_set_desc_pool(cmd_buf, desc_pool)
+        gpu.cmd_set_desc_heap(cmd_buf, desc_pool)
 
         lm_instances := make([]lm.Instance, len(gltf_scene.instances), allocator = context.temp_allocator)
         for &lm_instance, i in lm_instances
@@ -412,7 +415,7 @@ main :: proc()
                 gpu.cmd_set_raster_state(cmd_buf, { alpha_to_coverage = true })
 
                 // Set texture and sampler heaps
-                gpu.cmd_set_desc_pool(cmd_buf, desc_pool)
+                gpu.cmd_set_desc_heap(cmd_buf, desc_pool)
 
                 gpu.cmd_set_depth_state(cmd_buf, {mode = {.Read, .Write}, compare = .Less})
 
@@ -509,7 +512,7 @@ main :: proc()
             gpu.cmd_set_shaders(cmd_buf, vert_shader_tonemap, frag_shader_tonemap)
 
             // Set texture and sampler heaps
-            gpu.cmd_set_desc_pool(cmd_buf, desc_pool)
+            gpu.cmd_set_desc_heap(cmd_buf, desc_pool)
 
             // Disable depth testing for fullscreen quad
             gpu.cmd_set_depth_state(cmd_buf, { mode = {}, compare = .Always })
@@ -1726,4 +1729,23 @@ dir_from_spherical_coords :: proc(azimuth: f32, elevation: f32) -> [3]f32
         math.sin(elevation),
         math.cos(elevation) * math.sin(azimuth),
     }
+}
+
+// Create a 1x1 magenta texture (useful as default/missing texture indicator)
+create_magenta_texture :: proc(upload_arena: ^gpu.Arena, cmd_buf: gpu.Command_Buffer) -> gpu.Owned_Texture
+{
+    magenta_pixels := [4]u8{255, 0, 255, 255}
+    staging := gpu.arena_alloc(upload_arena, u8, 4)
+    copy(staging.cpu, magenta_pixels[:])
+
+    texture := gpu.texture_alloc_and_create(
+        {
+            type = .D2,
+            dimensions = {1, 1, 1},
+            format = .RGBA8_Unorm,
+            usage = {.Sampled},
+        },
+    )
+    gpu.cmd_copy_to_texture(cmd_buf, texture, staging)
+    return texture
 }

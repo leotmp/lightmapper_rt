@@ -40,16 +40,18 @@ Lights :: struct
     dir_light_emission: vec3,
 }
 
-main :: (data: ^Data @data, global_invocation_id: vec3 @global_invocation_id)
+main :: (data: ^Data @data, global_invocation_id_3: ivec3 @global_invocation_id)
 {
-    init_rng(uint(global_invocation_id.y * data.resolution.x + global_invocation_id.x), data.accum_counter);
+    global_invocation_id := global_invocation_id_3.xy;
+    resolution := ivec2(data.resolution);
+    init_rng(uint(global_invocation_id.y * resolution.x + global_invocation_id.x), data.accum_counter);
 
     color: vec3;
 
     start_ray: Ray;
     if data.is_lightmap
     {
-        if global_invocation_id.x >= data.resolution.x || global_invocation_id.y >= data.resolution.y {
+        if any(global_invocation_id >= resolution) {
             return;
         }
 
@@ -69,7 +71,7 @@ main :: (data: ^Data @data, global_invocation_id: vec3 @global_invocation_id)
     }
     else
     {
-        uv := global_invocation_id.xy / data.resolution;
+        uv := vec2(global_invocation_id.xy) / vec2(resolution);
         coord := 2.0 * uv - 1.0;
         coord.y *= -1.0;
 
@@ -85,7 +87,7 @@ main :: (data: ^Data @data, global_invocation_id: vec3 @global_invocation_id)
         color = clamp_radiance(pathtrace(start_ray, data.scene, data.tlas, data.linear_sampler));
     }
 
-    if global_invocation_id.x < data.resolution.x && global_invocation_id.y < data.resolution.y
+    if all(global_invocation_id < resolution)
     {
         if data.accum_counter > 1
         {
@@ -119,7 +121,7 @@ bake_texel :: (world_pos: vec3, world_normal: vec3, scene: Scene, tlas: bvh_id, 
         {
             incoming = sample_lights(scene.lights, origin, world_normal, world_normal);
         }
-        if incoming == vec3(0, 0, 0) { continue; }
+        if all(incoming == vec3(0)) { continue; }
 
         prob := bsdf_prob  * sample_matte_pdf(world_normal, incoming) +
                 light_prob * sample_lights_pdf(scene.lights, origin, incoming);
@@ -178,7 +180,7 @@ pathtrace :: (start_ray: Ray, scene: Scene, tlas: bvh_id, sampler: sampler_id) -
                 incoming = sample_lights(scene.lights, hit_pos, hit.normal, outgoing);
             }
 
-            if incoming == vec3(0, 0, 0) { break; }
+            if all(incoming == vec3(0)) { break; }
 
             prob := bsdf_prob * sample_matte_pdf(hit.normal, incoming) +
                     light_prob * sample_lights_pdf(scene.lights, hit_pos, incoming);
@@ -190,7 +192,7 @@ pathtrace :: (start_ray: Ray, scene: Scene, tlas: bvh_id, sampler: sampler_id) -
         ray.dir = incoming;
 
         // Check weight.
-        if weight == vec3(0, 0, 0) || !is_finite(weight) { break; }
+        if all(weight == vec3(0)) || !is_finite(weight) { break; }
 
         // Russian roulette.
         if(bounce > 3)
@@ -270,7 +272,7 @@ ray_scene_intersection :: (ray: Ray, scene: Scene, tlas: bvh_id) -> Hit_Info
     n2 := mesh.normal[indices[base_idx+2]];
     normal := normalize(n0 * w + n1 * hit.barycentrics.x + n2 * hit.barycentrics.y);
     if hit.front_face { normal *= -1.0; }
-    world_normal := normalize(transpose(hit.world_to_object) * vec4(normal.xyz, 0));
+    world_normal := normalize(transpose(hit.world_to_object) * normal.xyz);
 
     bary := hit.barycentrics;
     hit_info.hit = true;

@@ -13,7 +13,7 @@ Data :: struct
 Output :: struct
 {
     pos: vec4 @position,
-    uv: vec2 @output(0),
+    uv: vec2 @io(0),
 }
 
 main :: (vert_id: uint @vert_id, data: ^Data @data) -> Output

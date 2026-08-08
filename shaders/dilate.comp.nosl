@@ -5,13 +5,13 @@ Data :: struct
     input: texture_rw_id,
 }
 
-main :: (data: ^Data @data, gid3: vec3 @global_invocation_id)
+main :: (data: ^Data @data, gid3: ivec3 @global_invocation_id)
 {
     gid := gid3.xy;
 
     tex_size := min(texture_size(data.output), texture_size(data.input));
 
-    if gid.x < 0 || gid.x >= tex_size.x || gid.y < 0 || gid.y >= tex_size.y { return; }
+    if any(gid < ivec2(0)) || any(gid > tex_size) { return; }
 
     src_color := texture_load(data.input, gid);
     if src_color.a > 0.5
@@ -26,7 +26,7 @@ main :: (data: ^Data @data, gid3: vec3 @global_invocation_id)
     {
         for dx := -1; dx <= 1; dx += 1
         {
-            neighbor_coord := clamp(gid + vec2(float(dx), float(dy)), vec2(0), tex_size - 1);
+            neighbor_coord := clamp(gid + ivec2(dx, dy), ivec2(0), ivec2(tex_size - 1));
             neighbor_color := texture_load(data.input, neighbor_coord);
             if neighbor_color.a > 0.5
             {

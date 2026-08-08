@@ -19,7 +19,7 @@ Data :: struct
 
 PI: float = 3.14159265359;
 
-main :: (normal_vert: vec4 @input(0), uv: vec2 @input(1, centroid), lm_uv: vec2 @input(2, centroid), world_pos: vec4 @input(3), data: ^Data @data) -> vec4 @output(0)
+main :: (normal_vert: vec4 @io(0), uv: vec2 @io(1, centroid), lm_uv: vec2 @io(2, centroid), world_pos: vec4 @io(3), data: ^Data @data) -> vec4 @io(0)
 {
     // Sample base color texture
     base_color := texture_sample(data.base_color_map, data.base_color_map_sampler, uv);
@@ -84,9 +84,9 @@ cubic :: (v: float) -> vec4
 texture_sample_bicubic :: (texture: texture_id, linear_sampler: sampler_id, coords: vec2) -> vec4
 {
     tex_size := texture_size(texture, linear_sampler, 0);
-    inv_tex_size := 1.0 / tex_size;
+    inv_tex_size := 1.0 / vec2(tex_size);
 
-    tex_coords := coords * tex_size - 0.5;
+    tex_coords := coords * vec2(tex_size) - 0.5;
 
     fxy := fract(tex_coords);
     tex_coords -= fxy;

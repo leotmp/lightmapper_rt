@@ -2,7 +2,7 @@
 Output :: struct
 {
     pos: vec4 @position,
-    to_sample: vec2 @output(0),
+    to_sample: vec2 @io(0),
 }
 
 Data :: struct
