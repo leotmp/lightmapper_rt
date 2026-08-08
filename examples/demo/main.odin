@@ -90,7 +90,7 @@ main :: proc()
     ensure(ok)
     defer gpu.cleanup()
 
-    gpu.swapchain_init_from_sdl(window, Frames_In_Flight)
+    gpu.swapchain_create_from_sdl(window, Frames_In_Flight)
 
     vert_shader_lit := gpu.shader_create(#load("shaders/lit.vert.spv", []u32), .Vertex)
     frag_shader_lit := gpu.shader_create(#load("shaders/lit.frag.spv", []u32), .Fragment)
@@ -113,9 +113,9 @@ main :: proc()
         gpu.shader_destroy(frag_shader_tonemap)
     }
 
-    upload_arena := gpu.arena_init()
+    upload_arena := gpu.arena_create()
     defer gpu.arena_destroy(&upload_arena)
-    bvh_scratch_arena := gpu.arena_init(mem_type = .GPU)
+    bvh_scratch_arena := gpu.arena_create(mem_type = .GPU)
     defer gpu.arena_destroy(&bvh_scratch_arena)
 
     upload_sem = gpu.semaphore_create()
@@ -293,7 +293,7 @@ main :: proc()
     max_gt_accums := u32(1000)
 
     frame_arenas: [Frames_In_Flight]gpu.Arena
-    for &frame_arena in frame_arenas do frame_arena = gpu.arena_init()
+    for &frame_arena in frame_arenas do frame_arena = gpu.arena_create()
     defer for &frame_arena in frame_arenas do gpu.arena_destroy(&frame_arena)
     next_frame := u64(1)
     frame_sem := gpu.semaphore_create(0)
@@ -842,7 +842,7 @@ load_scene_textures_from_gltf :: proc(
     scene: ^shared.Scene,
     desc_pool: ^gpu.Descriptor_Pool,
 ) {
-    upload_arena := gpu.arena_init()
+    upload_arena := gpu.arena_create()
     defer gpu.arena_destroy(&upload_arena)
 
     for info in texture_infos {

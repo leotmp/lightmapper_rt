@@ -40,8 +40,8 @@ init :: proc(ctx: ^Context, desc_pool: ^gpu.Descriptor_Pool)
 {
     ctx.oidn_device = create_oidn_context()
     ctx.shaders = shaders_create()
-    ctx.bvh_scratch_arena = gpu.arena_init(mem_type = gpu.Memory.GPU)
-    ctx.upload_arena = gpu.arena_init()
+    ctx.bvh_scratch_arena = gpu.arena_create(mem_type = gpu.Memory.GPU)
+    ctx.upload_arena = gpu.arena_create()
     ctx.desc_pool = desc_pool
     ctx.linear_sampler_id = gpu.desc_pool_alloc_sampler(desc_pool, gpu.sampler_descriptor({}))
     ctx.point_sampler_id = gpu.desc_pool_alloc_sampler(desc_pool, gpu.sampler_descriptor({ min_filter = .Nearest, mag_filter = .Nearest }))
