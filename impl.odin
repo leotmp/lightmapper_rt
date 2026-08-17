@@ -841,7 +841,7 @@ create_oidn_context :: proc() -> oidn.Device
         device = oidn.NewDeviceByUUID(&id_props.deviceUUID[0])
     }
 
-    oidn.SetDeviceErrorFunction(device, oidn_error_callback, nil)
+    // oidn.SetDeviceErrorFunction(device, oidn_error_callback, nil)
     oidn.CommitDevice(device)
 
     oidn_check(device)
@@ -1212,7 +1212,13 @@ oidn_shared_semaphore_from_vk_semaphore :: proc(device: oidn.Device, sem: Extern
     res: oidn.Semaphore
     when ODIN_OS == .Windows
     {
-        res = oidn.NewSharedSemaphoreFromWin32Handle(device, { .TIMELINE_SEMAPHORE_WIN32 }, sem.win_handle, nil)
+        // NOTE: CUDA wants .TIMELINE_SEMAPHORE_WIN32 here, but HIP (AMD) wants .OPAQUE_WIN32 for some reason...
+        res = oidn.NewSharedSemaphoreFromWin32Handle(device, { .OPAQUE_WIN32 }, sem.win_handle, nil)
+        msg: cstring
+        err := oidn.GetDeviceError(device, &msg)
+        if err != .NONE {
+            res = oidn.NewSharedSemaphoreFromWin32Handle(device, { .TIMELINE_SEMAPHORE_WIN32 }, sem.win_handle, nil)
+        }
     }
     else when ODIN_OS == .Linux
     {
