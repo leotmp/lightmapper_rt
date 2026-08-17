@@ -238,6 +238,7 @@ bake_is_done :: proc(bake: ^Bake) -> bool
 bake_destroy :: proc(bake: ^Bake)
 {
     gpu.semaphore_destroy(bake.bake_sem)
+    gpu.semaphore_destroy(bake.shared_sem_nogfx)
     if bake.denoise_thread != nil do thread.destroy(bake.denoise_thread)
     bake.denoise_thread = nil
     gbufs_destroy(&bake.gbufs)
