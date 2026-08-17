@@ -158,13 +158,6 @@ Bake :: struct
     lightmap_id: u32,
     gbufs_id: u32,
 
-    denoise_done: bool,
-    denoise_thread: ^thread.Thread,
-    state: Bake_State,
-    bake_sem: gpu.Semaphore,
-    bake_counter: u64,
-    last_copy_counter: u64,
-
     pathtrace_output: gpu.Owned_Texture,
     pathtrace_output_rw_id: u32,
     tmp_tex: gpu.Owned_Texture,
@@ -174,10 +167,9 @@ Bake :: struct
     // OIDN
     shared_buf_vk: External_Buf,
     shared_buf_oidn: oidn.Buffer,
-    shared_sem_vk: External_Semaphore,
     shared_sem_oidn: oidn.Semaphore,
     shared_sem_nogfx: gpu.Semaphore,
-    test_value: u64,
+    bake_sem_value: u64,
     filter: oidn.Filter,
 
     accum_counter: u32,
@@ -237,10 +229,7 @@ bake_is_done :: proc(bake: ^Bake) -> bool
 
 bake_destroy :: proc(bake: ^Bake)
 {
-    gpu.semaphore_destroy(bake.bake_sem)
     gpu.semaphore_destroy(bake.shared_sem_nogfx)
-    if bake.denoise_thread != nil do thread.destroy(bake.denoise_thread)
-    bake.denoise_thread = nil
     gbufs_destroy(&bake.gbufs)
     gpu.texture_free_and_destroy(&bake.pathtrace_output)
     gpu.texture_free_and_destroy(&bake.tmp_tex)

@@ -25,17 +25,6 @@ import oidn "oidn_odin_bindings"
 DENOISE_TILE_SIZE :: 1024
 DENOISE_TILE_OVERLAP :: 32
 
-// NOTE: Unfortunately OIDN does not yet support GPU synchronization
-// (external semaphores), so we'll need to do synchronization on the CPU side.
-// Instead of waiting on the CPU on each iteration, we can keep path tracing
-// in the meantime so that baking speed is not too affected.
-Bake_State :: enum
-{
-    Start = 0,
-    Wait_For_Denoise,
-    Wait_For_Copy,  // Waiting for copy from pathtrace_output to the shader OIDN buffer.
-}
-
 bake_begin_impl :: proc(ctx: ^Context, #any_int lightmap_size: i64, samples: u32, lightmap: gpu.Texture, instances: []Instance, lights: Lights) -> Bake
 {
     assert(lightmap_size > 0)
@@ -48,8 +37,6 @@ bake_begin_impl :: proc(ctx: ^Context, #any_int lightmap_size: i64, samples: u32
     bake.lightmap_size = u32(lightmap_size)
     bake.lightmap = lightmap
     bake.max_samples = samples
-    bake.bake_sem = gpu.semaphore_create()
-    bake.denoise_done = true
 
     bake.lightmap_rw_id = gpu.desc_pool_alloc_texture_rw(ctx.desc_pool, gpu.texture_rw_view_descriptor(lightmap, {}))
     bake.lightmap_id = gpu.desc_pool_alloc_texture(ctx.desc_pool, gpu.texture_view_descriptor(bake.lightmap, {}))
@@ -71,9 +58,9 @@ bake_begin_impl :: proc(ctx: ^Context, #any_int lightmap_size: i64, samples: u32
 
     bake.shared_buf_vk = create_vk_external_buffer_for_oidn(u32(lightmap_size * lightmap_size * 2 * 4))  // TODO: What about other formats?
     bake.shared_buf_oidn = oidn_shared_buffer_from_vk_buffer(ctx.oidn_device, bake.shared_buf_vk)
-    bake.shared_sem_vk = create_vk_external_semaphore_for_oidn()
-    bake.shared_sem_oidn = oidn_shared_semaphore_from_vk_semaphore(ctx.oidn_device, bake.shared_sem_vk)
-    bake.shared_sem_nogfx = gpu.vk_move_semaphore(bake.shared_sem_vk.vk_sem)
+    shared_sem_vk := create_vk_external_semaphore_for_oidn()
+    bake.shared_sem_oidn = oidn_shared_semaphore_from_vk_semaphore(ctx.oidn_device, shared_sem_vk)
+    bake.shared_sem_nogfx = gpu.vk_move_semaphore(shared_sem_vk.vk_sem)
     bake.filter = oidn_create_lightmap_filter(ctx.oidn_device, bake.shared_buf_oidn, bake.shared_buf_oidn, u32(lightmap_size), .HIGH)
 
     cmd_buf := gpu.commands_begin(.Main)
@@ -119,131 +106,9 @@ bake_begin_impl :: proc(ctx: ^Context, #any_int lightmap_size: i64, samples: u32
     return bake
 }
 
-/*
 bake_iteration_impl :: proc(bake: ^Bake, frame_arena: ^gpu.Arena, instances: []Instance, lights: Lights, fix_seams: bool, denoise_on_preview: bool)
 {
-    //if !fix_seams && bake.accum_counter >= bake.max_samples do return
-
-    delete(bake.instances)
-    bake.instances = slice.clone_to_dynamic(instances)
-    bake.lights = lights
-
-    resolution := [2]f32 { f32(bake.lightmap_size), f32(bake.lightmap_size) }
-    if bake.accum_counter < bake.max_samples
-    {
-        cmd_buf := gpu.commands_begin(.Main)
-        gpu.cmd_barrier(cmd_buf, .All, .All, {})  // TODO
-        pathtrace(bake, cmd_buf, frame_arena, .Lightmap, {}, bake.pathtrace_output_rw_id, 4096, bake.accum_counter, bake.lights)  // TODO
-        gpu.cmd_barrier(cmd_buf, .All, .All, {})  // TODO
-
-        if bake.accum_counter == 0 || !denoise_on_preview do bake.state = .Start
-
-        bake.accum_counter = min(bake.max_samples, bake.accum_counter + 1)
-        next_counter := bake.bake_counter + 1
-
-        switch bake.state
-        {
-            case .Start:
-            {
-                gpu.cmd_blit_texture(cmd_buf, bake.lightmap, {}, bake.pathtrace_output, {}, .Linear)
-                if bake.accum_counter >= 10
-                {
-                    oidn_copy_to_shared_buf(cmd_buf, bake.shared_buf_vk, bake.pathtrace_output)
-                    gpu.cmd_barrier(cmd_buf, .All, .All)
-
-                    bake.denoise_thread = nil
-                    bake.state = .Wait_For_Copy
-                    bake.last_copy_counter = next_counter
-                }
-            }
-            case .Wait_For_Denoise:
-            {
-                denoise_done := intr.volatile_load(&bake.denoise_done)
-                if denoise_done
-                {
-                    fmt.println("Denoise done")
-                    if bake.denoise_thread != nil do thread.destroy(bake.denoise_thread)
-                    defer bake.denoise_thread = nil
-
-                    oidn_copy_from_shared_buf(cmd_buf, bake.lightmap, bake.shared_buf_vk)
-                    gpu.cmd_barrier(cmd_buf, .All, .All)
-
-                    // Dilate
-                    {
-                        gpu.cmd_blit_texture(cmd_buf, bake.tmp_tex, {}, bake.lightmap, {}, .Linear)
-                        gpu.cmd_barrier(cmd_buf, .All, .All)
-
-                        dilate(bake, cmd_buf, frame_arena, resolution)
-                        gpu.cmd_barrier(cmd_buf, .All, .All)
-                    }
-
-                    // gpu.cmd_blit_texture(cmd_buf, bake.tmp_tex, {}, bake.pathtrace_output, {}, .Linear)
-
-                    oidn_copy_to_shared_buf(cmd_buf, bake.shared_buf_vk, bake.pathtrace_output)
-                    gpu.cmd_barrier(cmd_buf, .All, .All)
-
-                    bake.denoise_thread = nil
-                    bake.state = .Wait_For_Copy
-                    bake.last_copy_counter = next_counter
-                }
-            }
-            case .Wait_For_Copy:
-            {
-                sem_value := gpu.semaphore_get_value(bake.bake_sem)
-                copy_done := sem_value >= bake.last_copy_counter
-                if copy_done
-                {
-                    fmt.println("Copy done")
-                    start_denoise_lightmap_filter(bake)
-                    bake.state = .Wait_For_Denoise
-                }
-            }
-        }
-
-        bake.bake_counter += 1
-        gpu.cmd_add_signal_semaphore(cmd_buf, bake.bake_sem, bake.bake_counter)
-        gpu.queue_submit(.Main, { cmd_buf })
-
-        // if denoise
-        //if bake.accum_counter == bake.max_samples - 1
-        when false
-        {
-            gpu.queue_submit(.Main, { cmd_buf })
-            gpu.queue_wait_idle(.Main)
-
-            oidn_run_lightmap_filter(bake.ctx.oidn_device, bake.filter)
-
-            cmd_buf = gpu.commands_begin(.Main)
-            oidn_copy_from_shared_buf(cmd_buf, bake.pathtrace_output, bake.shared_buf_vk)
-            gpu.cmd_barrier(cmd_buf, .All, .All)
-        }
-
-    }
-
-    when false
-    {
-    cmd_buf := gpu.commands_begin(.Main)
-    gpu.cmd_blit_texture(cmd_buf, bake.pathtrace_output, bake.tmp_tex,  { {} }, { {} }, .Linear)
-    gpu.cmd_blit_texture(cmd_buf, bake.pathtrace_output, bake.lightmap, { {} }, { {} }, .Linear)
-    gpu.cmd_barrier(cmd_buf, .All, .All)
-
-    dilate(bake, cmd_buf, frame_arena, resolution)
-    gpu.cmd_barrier(cmd_buf, .All, .All)
-
-    if fix_seams
-    {
-        smooth_seams(bake, cmd_buf, frame_arena, bake.instances[:], bake.ctx.meshes.resources[:], bake.ctx.lm_uvs.resources[:], resolution)
-        gpu.cmd_barrier(cmd_buf, .All, .All)
-    }
-
-    gpu.queue_submit(.Main, { cmd_buf })
-    }
-}
-*/
-
-bake_iteration_impl :: proc(bake: ^Bake, frame_arena: ^gpu.Arena, instances: []Instance, lights: Lights, fix_seams: bool, denoise_on_preview: bool)
-{
-    //if !fix_seams && bake.accum_counter >= bake.max_samples do return
+    if !fix_seams && bake.accum_counter >= bake.max_samples do return
 
     delete(bake.instances)
     bake.instances = slice.clone_to_dynamic(instances)
@@ -262,24 +127,22 @@ bake_iteration_impl :: proc(bake: ^Bake, frame_arena: ^gpu.Arena, instances: []I
             gpu.cmd_barrier(cmd_buf, .All, .All, {})  // TODO
 
             bake.accum_counter = min(bake.max_samples, bake.accum_counter + 1)
-            if bake.test_value > 0 {
-                gpu.cmd_add_wait_semaphore(cmd_buf, bake.shared_sem_nogfx, bake.test_value)
+            if bake.bake_sem_value > 0 {
+                gpu.cmd_add_wait_semaphore(cmd_buf, bake.shared_sem_nogfx, bake.bake_sem_value)
             }
-            bake.test_value += 1
-            gpu.cmd_add_signal_semaphore(cmd_buf, bake.shared_sem_nogfx, bake.test_value)
+            bake.bake_sem_value += 1
+            gpu.cmd_add_signal_semaphore(cmd_buf, bake.shared_sem_nogfx, bake.bake_sem_value)
 
-            bake.bake_counter += 1
-            gpu.cmd_add_signal_semaphore(cmd_buf, bake.bake_sem, bake.bake_counter)
             gpu.queue_submit(.Main, { cmd_buf })
         }
 
-        // Test external semaphores
-        oidn.WaitSemaphoresAsync(bake.ctx.oidn_device, &bake.shared_sem_oidn, &bake.test_value, nil, 1)
+        // Wait on the shared semaphore on the OIDN side
+        oidn.WaitSemaphoresAsync(bake.ctx.oidn_device, &bake.shared_sem_oidn, &bake.bake_sem_value, nil, 1)
 
         oidn_run_lightmap_filter(bake.ctx.oidn_device, bake.filter, bake.shared_buf_oidn, bake.shared_buf_oidn, bake.lightmap_size)
 
-        bake.test_value += 1
-        oidn.SignalSemaphoresAsync(bake.ctx.oidn_device, &bake.shared_sem_oidn, &bake.test_value, 1)
+        bake.bake_sem_value += 1
+        oidn.SignalSemaphoresAsync(bake.ctx.oidn_device, &bake.shared_sem_oidn, &bake.bake_sem_value, 1)
 
         {
             cmd_buf := gpu.commands_begin(.Main)
@@ -287,9 +150,9 @@ bake_iteration_impl :: proc(bake: ^Bake, frame_arena: ^gpu.Arena, instances: []I
             oidn_copy_from_shared_buf(cmd_buf, bake.lightmap, bake.shared_buf_vk)
             gpu.cmd_barrier(cmd_buf, .All, .All)
 
-            gpu.cmd_add_wait_semaphore(cmd_buf, bake.shared_sem_nogfx, bake.test_value)
-            bake.test_value += 1
-            gpu.cmd_add_signal_semaphore(cmd_buf, bake.shared_sem_nogfx, bake.test_value)
+            gpu.cmd_add_wait_semaphore(cmd_buf, bake.shared_sem_nogfx, bake.bake_sem_value)
+            bake.bake_sem_value += 1
+            gpu.cmd_add_signal_semaphore(cmd_buf, bake.shared_sem_nogfx, bake.bake_sem_value)
             gpu.queue_submit(.Main, { cmd_buf })
         }
     }
@@ -1009,9 +872,11 @@ oidn_run_lightmap_filter :: proc(device: oidn.Device, filter: oidn.Filter, color
         bytes_per_pixel := u32(2 * 4)
 
         // Lots of stuff in OIDN to do to get tiled denoising to work...
-        for ty in 0..<(lightmap_size+DENOISE_TILE_SIZE)/DENOISE_TILE_SIZE
+        // for ty in 0..<(lightmap_size+DENOISE_TILE_SIZE)/DENOISE_TILE_SIZE
+        for ty in 0..<1
         {
-            for tx in 0..<(lightmap_size+DENOISE_TILE_SIZE)/DENOISE_TILE_SIZE
+            // for tx in 0..<(lightmap_size+DENOISE_TILE_SIZE)/DENOISE_TILE_SIZE
+            for tx in 0..<1
             {
                 inner_x0: int = int(tx * DENOISE_TILE_SIZE)
                 inner_y0: int = int(ty * DENOISE_TILE_SIZE)
@@ -1036,7 +901,7 @@ oidn_run_lightmap_filter :: proc(device: oidn.Device, filter: oidn.Filter, color
                 oidn.CommitFilter(filter)
                 oidn_check(device)
 
-                oidn.ExecuteFilter(filter)
+                oidn.ExecuteFilterAsync(filter)
                 oidn_check(device)
             }
         }
@@ -1047,18 +912,6 @@ oidn_run_lightmap_filter :: proc(device: oidn.Device, filter: oidn.Filter, color
         oidn_check(device)
     }
 }
-
-/*
-start_denoise_lightmap_filter :: proc(bake: ^Bake)
-{
-    bake.denoise_done = false
-    if bake.denoise_thread != nil do thread.destroy(bake.denoise_thread)
-    bake.denoise_thread = thread.create_and_start_with_poly_data(bake, proc(bake: ^Bake) {
-        oidn_run_lightmap_filter(bake.ctx.oidn_device, bake.filter, bake.shared_buf_oidn, bake.shared_buf_oidn, bake.lightmap_size)
-        intr.volatile_store(&bake.denoise_done, true)
-    })
-}
-*/
 
 oidn_check :: proc(device: oidn.Device)
 {
