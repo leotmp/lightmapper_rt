@@ -123,7 +123,7 @@ bake_iteration_impl :: proc(bake: ^Bake, frame_arena: ^gpu.Arena, instances: []I
             pathtrace(bake, cmd_buf, frame_arena, .Lightmap, {}, bake.pathtrace_output_rw_id, 4096, bake.accum_counter, bake.lights)  // TODO
             gpu.cmd_barrier(cmd_buf, .All, .All, {})  // TODO
 
-            oidn_copy_to_shared_buf(cmd_buf, bake.shared_buf_vk, bake.pathtrace_output)
+            oidn_copy_to_shared_buf(cmd_buf, bake.shared_buf_vk, bake.pathtrace_output, bake.lightmap_size, bake.denoise_tile_idx)
             gpu.cmd_barrier(cmd_buf, .All, .All, {})  // TODO
 
             bake.accum_counter = min(bake.max_samples, bake.accum_counter + 1)
@@ -139,7 +139,7 @@ bake_iteration_impl :: proc(bake: ^Bake, frame_arena: ^gpu.Arena, instances: []I
         // Wait on the shared semaphore on the OIDN side
         oidn.WaitSemaphoresAsync(bake.ctx.oidn_device, &bake.shared_sem_oidn, &bake.bake_sem_value, nil, 1)
 
-        oidn_run_lightmap_filter(bake.ctx.oidn_device, bake.filter, bake.shared_buf_oidn, bake.shared_buf_oidn, bake.lightmap_size)
+        oidn_run_lightmap_filter(bake.ctx.oidn_device, bake.filter, bake.shared_buf_oidn, bake.shared_buf_oidn, bake.lightmap_size, &bake.denoise_tile_idx)
 
         bake.bake_sem_value += 1
         oidn.SignalSemaphoresAsync(bake.ctx.oidn_device, &bake.shared_sem_oidn, &bake.bake_sem_value, 1)
@@ -863,48 +863,47 @@ oidn_shared_buffer_from_vk_buffer :: proc(device: oidn.Device, buf: External_Buf
     else do #panic("Unsupported OS.")
 }
 
-oidn_run_lightmap_filter :: proc(device: oidn.Device, filter: oidn.Filter, color: oidn.Buffer, output: oidn.Buffer, lightmap_size: u32)
+oidn_run_lightmap_filter :: proc(device: oidn.Device, filter: oidn.Filter, color: oidn.Buffer, output: oidn.Buffer, lightmap_size: u32, tile_idx: ^u32)
 {
-    TILED :: false
-
+    TILED :: true
     when TILED
     {
         bytes_per_pixel := u32(2 * 4)
 
+        tile_count_x := (lightmap_size + DENOISE_TILE_SIZE - 1) / DENOISE_TILE_SIZE
+        tile_count_y := (lightmap_size + DENOISE_TILE_SIZE - 1) / DENOISE_TILE_SIZE
+
         // Lots of stuff in OIDN to do to get tiled denoising to work...
-        // for ty in 0..<(lightmap_size+DENOISE_TILE_SIZE)/DENOISE_TILE_SIZE
-        for ty in 0..<1
-        {
-            // for tx in 0..<(lightmap_size+DENOISE_TILE_SIZE)/DENOISE_TILE_SIZE
-            for tx in 0..<1
-            {
-                inner_x0: int = int(tx * DENOISE_TILE_SIZE)
-                inner_y0: int = int(ty * DENOISE_TILE_SIZE)
-                inner_x1: int = clamp(inner_x0 + DENOISE_TILE_SIZE, 0, int(lightmap_size))
-                inner_y1: int = clamp(inner_y0 + DENOISE_TILE_SIZE, 0, int(lightmap_size))
+        ty := tile_idx^ / tile_count_x
+        tx := tile_idx^ % tile_count_x
 
-                t_x0 := clamp(inner_x0 - DENOISE_TILE_OVERLAP, 0, int(lightmap_size))
-                t_y0 := clamp(inner_y0 - DENOISE_TILE_OVERLAP, 0, int(lightmap_size))
-                t_x1 := clamp(inner_x1 + DENOISE_TILE_OVERLAP, 0, int(lightmap_size))
-                t_y1 := clamp(inner_y1 + DENOISE_TILE_OVERLAP, 0, int(lightmap_size))
-                tile_w := t_x1 - t_x0
-                tile_h := t_y1 - t_y0
+        inner_x0: int = int(tx * DENOISE_TILE_SIZE)
+        inner_y0: int = int(ty * DENOISE_TILE_SIZE)
+        inner_x1: int = clamp(inner_x0 + DENOISE_TILE_SIZE, 0, int(lightmap_size))
+        inner_y1: int = clamp(inner_y0 + DENOISE_TILE_SIZE, 0, int(lightmap_size))
 
-                byte_offset := (t_y0 * int(lightmap_size) + t_x0) * int(bytes_per_pixel)
+        t_x0 := clamp(inner_x0 - DENOISE_TILE_OVERLAP, 0, int(lightmap_size))
+        t_y0 := clamp(inner_y0 - DENOISE_TILE_OVERLAP, 0, int(lightmap_size))
+        t_x1 := clamp(inner_x1 + DENOISE_TILE_OVERLAP, 0, int(lightmap_size))
+        t_y1 := clamp(inner_y1 + DENOISE_TILE_OVERLAP, 0, int(lightmap_size))
+        tile_w := t_x1 - t_x0
+        tile_h := t_y1 - t_y0
 
-                oidn.SetFilterImage(filter, "color",  color,  .HALF3, uint(tile_w), uint(tile_h),
-                                    byteOffset = uint(byte_offset),
-                                    pixelByteStride = uint(bytes_per_pixel), rowByteStride = uint(bytes_per_pixel * lightmap_size))
-                oidn.SetFilterImage(filter, "output", output, .HALF3, uint(tile_w), uint(tile_h),
-                                    byteOffset = uint(byte_offset),
-                                    pixelByteStride = uint(bytes_per_pixel), rowByteStride = uint(bytes_per_pixel * lightmap_size))
-                oidn.CommitFilter(filter)
-                oidn_check(device)
+        byte_offset := (t_y0 * int(lightmap_size) + t_x0) * int(bytes_per_pixel)
 
-                oidn.ExecuteFilterAsync(filter)
-                oidn_check(device)
-            }
-        }
+        oidn.SetFilterImage(filter, "color",  color,  .HALF3, uint(tile_w), uint(tile_h),
+                            byteOffset = uint(byte_offset),
+                            pixelByteStride = uint(bytes_per_pixel), rowByteStride = uint(bytes_per_pixel * lightmap_size))
+        oidn.SetFilterImage(filter, "output", output, .HALF3, uint(tile_w), uint(tile_h),
+                            byteOffset = uint(byte_offset),
+                            pixelByteStride = uint(bytes_per_pixel), rowByteStride = uint(bytes_per_pixel * lightmap_size))
+        oidn.CommitFilter(filter)
+        oidn_check(device)
+
+        oidn.ExecuteFilterAsync(filter)
+        oidn_check(device)
+
+        tile_idx^ = (tile_idx^ + 1) % (tile_count_x * tile_count_y)
     }
     else
     {
@@ -930,10 +929,32 @@ oidn_error_callback :: proc "c"(user_ptr: rawptr, code: oidn.Error, message: cst
     fmt.printfln("OIDN Error (%v): %v", code, message)
 }
 
-oidn_copy_to_shared_buf :: proc(cmd_buf: gpu.Command_Buffer, dst: External_Buf, src: gpu.Texture)
+oidn_copy_to_shared_buf :: proc(cmd_buf: gpu.Command_Buffer, dst: External_Buf, src: gpu.Texture, lightmap_size: u32, tile_idx: u32)
 {
     vk_image := gpu.vk_get_image(src)
     vk_cmd_buf := gpu.vk_get_command_buffer(cmd_buf)
+
+    tile_count_x := (lightmap_size + DENOISE_TILE_SIZE - 1) / DENOISE_TILE_SIZE
+    tile_count_y := (lightmap_size + DENOISE_TILE_SIZE - 1) / DENOISE_TILE_SIZE
+
+    // Lots of stuff in OIDN to do to get tiled denoising to work...
+    ty := tile_idx / tile_count_x
+    tx := tile_idx % tile_count_x
+
+    inner_x0: int = int(tx * DENOISE_TILE_SIZE)
+    inner_y0: int = int(ty * DENOISE_TILE_SIZE)
+    inner_x1: int = clamp(inner_x0 + DENOISE_TILE_SIZE, 0, int(lightmap_size))
+    inner_y1: int = clamp(inner_y0 + DENOISE_TILE_SIZE, 0, int(lightmap_size))
+
+    t_x0 := clamp(inner_x0 - DENOISE_TILE_OVERLAP, 0, int(lightmap_size))
+    t_y0 := clamp(inner_y0 - DENOISE_TILE_OVERLAP, 0, int(lightmap_size))
+    t_x1 := clamp(inner_x1 + DENOISE_TILE_OVERLAP, 0, int(lightmap_size))
+    t_y1 := clamp(inner_y1 + DENOISE_TILE_OVERLAP, 0, int(lightmap_size))
+    tile_w := t_x1 - t_x0
+    tile_h := t_y1 - t_y0
+
+    bytes_per_pixel := u32(2 * 4)
+    byte_offset := (t_y0 * int(lightmap_size) + t_x0) * int(bytes_per_pixel)
 
     vk.CmdCopyImageToBuffer2(vk_cmd_buf, &vk.CopyImageToBufferInfo2 {
         sType = .COPY_IMAGE_TO_BUFFER_INFO_2,
@@ -944,16 +965,22 @@ oidn_copy_to_shared_buf :: proc(cmd_buf: gpu.Command_Buffer, dst: External_Buf, 
         regionCount = 1,
         pRegions = &vk.BufferImageCopy2 {
             sType = .BUFFER_IMAGE_COPY_2,
-            bufferRowLength = 0,
+            bufferOffset = vk.DeviceSize(byte_offset),
+            bufferRowLength = lightmap_size,
             bufferImageHeight = 0,
             imageSubresource = vk.ImageSubresourceLayers {
                 aspectMask = { .COLOR },
                 layerCount = 1,
             },
+            imageOffset = {
+                i32(t_x0),
+                i32(t_y0),
+                0
+            },
             imageExtent = vk.Extent3D {
-                width = src.dimensions.x,
-                height = src.dimensions.y,
-                depth = 1,
+                width  = u32(tile_w),
+                height = u32(tile_h),
+                depth  = 1,
             },
         },
     })

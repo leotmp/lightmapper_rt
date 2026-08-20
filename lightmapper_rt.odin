@@ -169,6 +169,7 @@ Bake :: struct
     shared_buf_oidn: oidn.Buffer,
     shared_sem_oidn: oidn.Semaphore,
     shared_sem_nogfx: gpu.Semaphore,
+    denoise_tile_idx: u32,
     bake_sem_value: u64,
     filter: oidn.Filter,
 
