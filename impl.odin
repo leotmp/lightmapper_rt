@@ -659,28 +659,6 @@ smooth_seams :: proc(bake: ^Bake, cmd_buf: gpu.Command_Buffer, frame_arena: ^gpu
     gpu.cmd_barrier(cmd_buf, .All, .All)
 }
 
-// Lightmap dilation
-
-dilate :: proc(bake: ^Bake, cmd_buf: gpu.Command_Buffer, frame_arena: ^gpu.Arena, resolution: [2]f32)
-{
-    gpu.cmd_set_compute_shader(cmd_buf, bake.ctx.shaders.dilate)
-
-    Data :: struct #all_or_none {
-        output: u32,
-        input: u32,
-    }
-    data := gpu.arena_alloc(frame_arena, Data)
-    data.cpu^ = Data {
-        output = bake.lightmap_rw_id,
-        input = bake.tmp_tex_rw_id,
-    }
-    gpu.cmd_set_desc_heap(cmd_buf, bake.ctx.desc_pool^)
-
-    num_groups_x := (u32(resolution.x) + 8 - 1) / 8
-    num_groups_y := (u32(resolution.y) + 8 - 1) / 8
-    gpu.cmd_dispatch(cmd_buf, data, num_groups_x, num_groups_y, 1)
-}
-
 // OIDN interop:
 
 create_oidn_context :: proc() -> oidn.Device

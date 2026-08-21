@@ -55,13 +55,45 @@ main :: (data: ^Data @data, global_invocation_id_3: ivec3 @global_invocation_id)
             return;
         }
 
-        pos_sample    := texture_load(data.gbufs_id + 0, global_invocation_id.xy);
+        tex_size := texture_size(data.gbufs_id + 1);
+
         normal_sample := texture_load(data.gbufs_id + 1, global_invocation_id.xy);
-        if normal_sample.a < 0.1 {
+        sample_offset := ivec2(0);
+        found_sample := false;
+        if normal_sample.a >= 0.1
+        {
+            found_sample = true;
+        }
+        else
+        {
+            // Apply dilation to the source texture. Doing it this way will keep
+            // the same exact noise on dilated pixels which will not confuse the AI denoiser.
+            // (The alternative being dilating the output lightmap)
+            for dy := -1; dy <= 1 && !found_sample; dy += 1
+            {
+                for dx := -1; dx <= 1; dx += 1
+                {
+                    gid := global_invocation_id;
+                    neighbor_coord := clamp(gid + ivec2(dx, dy), ivec2(0), ivec2(tex_size - 1));
+                    neighbor_sample := texture_load(data.gbufs_id + 1, neighbor_coord);
+                    if neighbor_sample.a >= 0.1
+                    {
+                        normal_sample = neighbor_sample;
+                        sample_offset = ivec2(dx, dy);
+                        found_sample = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if !found_sample
+        {
             texture_store(data.output_texture_id, global_invocation_id.xy, vec4(0));
             return;
         }
 
+        pos_sample := texture_load(data.gbufs_id + 0, global_invocation_id.xy + sample_offset);
         normal := normalize((normal_sample * 2.0 - 1.0).xyz);
 
         start_ray: Ray;
