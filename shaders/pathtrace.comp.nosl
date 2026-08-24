@@ -99,7 +99,7 @@ main :: (data: ^Data @data, global_invocation_id_3: ivec3 @global_invocation_id)
         start_ray: Ray;
         start_ray.ori = pos_sample.xyz + normal * 0.0011;
         start_ray.dir = -normal;
-        color = clamp_radiance(bake_texel(pos_sample.xyz, normal, data.scene, data.tlas, data.linear_sampler));
+        color = bake_texel(pos_sample.xyz, normal, data.scene, data.tlas, data.linear_sampler);
     }
     else
     {
@@ -116,7 +116,7 @@ main :: (data: ^Data @data, global_invocation_id_3: ivec3 @global_invocation_id)
 
         start_ray.ori = world_camera_pos;
         start_ray.dir = world_camera_lookat;
-        color = clamp_radiance(pathtrace(start_ray, data.scene, data.tlas, data.linear_sampler));
+        color = pathtrace(start_ray, data.scene, data.tlas, data.linear_sampler, vec3(1));
     }
 
     if all(global_invocation_id < resolution)
@@ -159,21 +159,22 @@ bake_texel :: (world_pos: vec3, world_normal: vec3, scene: Scene, tlas: bvh_id, 
                 light_prob * sample_lights_pdf(scene.lights, origin, incoming);
 
         cos_term := max(0.0, dot(world_normal, incoming));
-        mis_weight := cos_term / prob;
 
         ray: Ray;
         ray.ori = origin;
         ray.dir = incoming;
-        accum += pathtrace(ray, scene, tlas, sampler) * mis_weight;
+        accum += pathtrace(ray, scene, tlas, sampler, vec3(1 / prob)) * cos_term;
     }
 
     return accum / float(N);
 }
 
-pathtrace :: (start_ray: Ray, scene: Scene, tlas: bvh_id, sampler: sampler_id) -> vec3
+pathtrace :: (start_ray: Ray, scene: Scene, tlas: bvh_id, sampler: sampler_id, init_weight_prob: vec3) -> vec3
 {
     radiance := vec3(0, 0, 0);
-    weight := vec3(1, 1, 1);
+    weight_albedo := vec3(1, 1, 1);    // Separating the 2 weights so that we can clamp_radiance only on the probability.
+    weight_prob   := init_weight_prob; // This is to get consistency between pathtrace output (ground truth) and lightmap
+                                       // bake output, since the lightmap bakes irradiance and doesn't multiply by albedo.
     ray := start_ray;
 
     max_bounces := 5;
@@ -183,7 +184,7 @@ pathtrace :: (start_ray: Ray, scene: Scene, tlas: bvh_id, sampler: sampler_id) -
         if !hit.hit
         {
             emission := sample_sky_emission(ray.dir, scene);
-            radiance += emission * weight;
+            radiance += clamp_radiance(emission * weight_prob) * weight_albedo;
             break;
         }
 
@@ -216,7 +217,8 @@ pathtrace :: (start_ray: Ray, scene: Scene, tlas: bvh_id, sampler: sampler_id) -
 
             prob := bsdf_prob * sample_matte_pdf(hit.normal, incoming) +
                     light_prob * sample_lights_pdf(scene.lights, hit_pos, incoming);
-            weight *= eval_matte(mat_point.color, hit.normal, incoming) / prob;
+            weight_albedo *= eval_matte(mat_point.color, hit.normal, incoming);
+            weight_prob   /= prob;
         }
 
         // Update ray.
@@ -224,14 +226,15 @@ pathtrace :: (start_ray: Ray, scene: Scene, tlas: bvh_id, sampler: sampler_id) -
         ray.dir = incoming;
 
         // Check weight.
-        if all(weight == vec3(0)) || !is_finite(weight) { break; }
+        if all(weight_prob == vec3(0)) || !is_finite(weight_prob) { break; }
 
         // Russian roulette.
         if(bounce > 3)
         {
-            survive_prob := min(0.99, max(weight.x, max(weight.y, weight.z)));
+            cur_weight := weight_prob * weight_albedo;
+            survive_prob := min(0.99, max(cur_weight.x, max(cur_weight.y, cur_weight.z)));
             if random_f32() >= survive_prob { break; }
-            weight = weight / survive_prob;
+            weight_prob /= survive_prob;
         }
     }
 
@@ -596,7 +599,7 @@ clamp_radiance :: (radiance: vec3) -> vec3
     res := radiance;
     if !is_finite(res) { res = vec3(0.0); }
 
-    max_radiance := 100.0;
+    max_radiance := 900.0;
     if res.x > max_radiance || res.y > max_radiance || res.z > max_radiance {
         res *= max_radiance / max(res.x, max(res.y, res.z));
     }

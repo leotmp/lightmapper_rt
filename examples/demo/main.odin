@@ -13,6 +13,7 @@ import "core:math/linalg"
 import "core:sync"
 import "core:thread"
 import "core:sys/info"
+import "core:os"
 
 import sdl "vendor:sdl3"
 
@@ -62,6 +63,15 @@ upload_sem_val: u64
 
 main :: proc()
 {
+    if len(os.args) > 1 {
+        fmt.println("aaah")
+        fmt.println("aaah")
+        fmt.println("aaah")
+        fmt.println("aaah")
+        fmt.println("aaah")
+        fmt.println("aaah")
+    }
+
     ok_i := sdl.Init({.VIDEO})
     assert(ok_i)
 
@@ -272,7 +282,7 @@ main :: proc()
                 albedo = { 1.0, 1.0, 1.0 },
             }
         }
-        bake = lm.bake_begin(&lm_ctx, LM_SIZE, 2000, lightmap, lm_instances, ui.lights)
+        bake = lm.bake_begin(&lm_ctx, LM_SIZE, 3000, lightmap, lm_instances, ui.lights)
     }
     defer lm.bake_destroy(&bake)
 
@@ -642,26 +652,6 @@ build_tlas :: proc(bvh_scratch_arena: ^gpu.Arena, cmd_buf: gpu.Command_Buffer, i
     gpu.cmd_build_tlas(cmd_buf, bvh, scratch, instances)
     return bvh
 }
-
-/*
-upload_bvh_instances :: proc(upload_arena: ^gpu.Arena, cmd_buf: gpu.Command_Buffer, instances: []shared.Instance, meshes: []Mesh_GPU) -> gpu.slice_t(gpu.BVH_Instance)
-{
-    instances_staging := gpu.arena_alloc(upload_arena, gpu.BVH_Instance, len(instances))
-    for &instance, i in instances_staging.cpu
-    {
-        instance = {
-            transform = shared.transform_to_gpu_transform(instances[i].transform),
-            blas_root = gpu.bvh_root_ptr(meshes[instances[i].mesh_idx].bvh),
-            disable_culling = true,
-            flip_facing = true,
-            mask = 1,
-        }
-    }
-    instances_local := gpu.mem_alloc(gpu.BVH_Instance, len(instances))
-    gpu.cmd_mem_copy(cmd_buf, instances_local, instances_staging, len(instances_staging.cpu))
-    return instances_local
-}
-*/
 
 Scene_GPU :: struct
 {

@@ -114,47 +114,70 @@ bake_iteration_impl :: proc(bake: ^Bake, frame_arena: ^gpu.Arena, instances: []I
     bake.instances = slice.clone_to_dynamic(instances)
     bake.lights = lights
 
-    //resolution := [2]f32 { f32(bake.lightmap_size), f32(bake.lightmap_size) }
-    if bake.accum_counter < bake.max_samples
+    if bake.accum_counter >= bake.max_samples do return
+
+    resolution := [2]f32 { f32(bake.lightmap_size), f32(bake.lightmap_size) }
+
+    if !denoise_on_preview {
+        bake.denoise_tile_idx = 0
+    }
+
+    // Pathtrace and copy to shared buffer
     {
+        cmd_buf := gpu.commands_begin(.Main)
+
+        if bake.accum_counter == 0 {
+            gpu.cmd_barrier(cmd_buf, .All, .All, {})  // Barrier from loading
+        }
+
+        pathtrace(bake, cmd_buf, frame_arena, .Lightmap, {}, bake.pathtrace_output_rw_id, resolution, bake.accum_counter, bake.lights)
+        bake.accum_counter = min(bake.max_samples, bake.accum_counter + 1)
+        gpu.cmd_barrier(cmd_buf, .Compute, .Transfer, {})
+
+        if denoise_on_preview
         {
-            cmd_buf := gpu.commands_begin(.Main)
-            gpu.cmd_barrier(cmd_buf, .All, .All, {})  // TODO
-            pathtrace(bake, cmd_buf, frame_arena, .Lightmap, {}, bake.pathtrace_output_rw_id, 4096, bake.accum_counter, bake.lights)  // TODO
-            gpu.cmd_barrier(cmd_buf, .All, .All, {})  // TODO
-
             oidn_copy_to_shared_buf(cmd_buf, bake.shared_buf_vk, bake.pathtrace_output, bake.lightmap_size, bake.denoise_tile_idx)
-            gpu.cmd_barrier(cmd_buf, .All, .All, {})  // TODO
+            gpu.cmd_barrier(cmd_buf, .Transfer, .All, {})
 
-            bake.accum_counter = min(bake.max_samples, bake.accum_counter + 1)
             if bake.bake_sem_value > 0 {
                 gpu.cmd_add_wait_semaphore(cmd_buf, bake.shared_sem_nogfx, bake.bake_sem_value)
             }
             bake.bake_sem_value += 1
             gpu.cmd_add_signal_semaphore(cmd_buf, bake.shared_sem_nogfx, bake.bake_sem_value)
-
-            gpu.queue_submit(.Main, { cmd_buf })
         }
 
-        // Wait on the shared semaphore on the OIDN side
+        gpu.queue_submit(.Main, { cmd_buf })
+    }
+
+    // Wait on the shared semaphore on the OIDN side
+    if denoise_on_preview
+    {
         oidn.WaitSemaphoresAsync(bake.ctx.oidn_device, &bake.shared_sem_oidn, &bake.bake_sem_value, nil, 1)
 
-        oidn_run_lightmap_filter(bake.ctx.oidn_device, bake.filter, bake.shared_buf_oidn, bake.shared_buf_oidn, bake.lightmap_size, &bake.denoise_tile_idx)
+        oidn_run_lightmap_filter(bake)
 
         bake.bake_sem_value += 1
         oidn.SignalSemaphoresAsync(bake.ctx.oidn_device, &bake.shared_sem_oidn, &bake.bake_sem_value, 1)
+    }
 
-        {
-            cmd_buf := gpu.commands_begin(.Main)
+    // Copy back from shared buffer
+    if denoise_on_preview
+    {
+        cmd_buf := gpu.commands_begin(.Main)
 
-            oidn_copy_from_shared_buf(cmd_buf, bake.lightmap, bake.shared_buf_vk)
-            gpu.cmd_barrier(cmd_buf, .All, .All)
+        oidn_copy_from_shared_buf(cmd_buf, bake.lightmap, bake.shared_buf_vk)
+        gpu.cmd_barrier(cmd_buf, .All, .All)
 
-            gpu.cmd_add_wait_semaphore(cmd_buf, bake.shared_sem_nogfx, bake.bake_sem_value)
-            bake.bake_sem_value += 1
-            gpu.cmd_add_signal_semaphore(cmd_buf, bake.shared_sem_nogfx, bake.bake_sem_value)
-            gpu.queue_submit(.Main, { cmd_buf })
-        }
+        gpu.cmd_add_wait_semaphore(cmd_buf, bake.shared_sem_nogfx, bake.bake_sem_value)
+        bake.bake_sem_value += 1
+        gpu.cmd_add_signal_semaphore(cmd_buf, bake.shared_sem_nogfx, bake.bake_sem_value)
+        gpu.queue_submit(.Main, { cmd_buf })
+    }
+    else
+    {
+        cmd_buf := gpu.commands_begin(.Main)
+        gpu.cmd_blit_texture(cmd_buf, bake.lightmap, {}, bake.pathtrace_output, {}, .Linear)
+        gpu.queue_submit(.Main, { cmd_buf })
     }
 }
 
@@ -841,8 +864,10 @@ oidn_shared_buffer_from_vk_buffer :: proc(device: oidn.Device, buf: External_Buf
     else do #panic("Unsupported OS.")
 }
 
-oidn_run_lightmap_filter :: proc(device: oidn.Device, filter: oidn.Filter, color: oidn.Buffer, output: oidn.Buffer, lightmap_size: u32, tile_idx: ^u32)
+oidn_run_lightmap_filter :: proc(bake: ^Bake)
 {
+    lightmap_size := bake.lightmap_size
+
     TILED :: true
     when TILED
     {
@@ -852,8 +877,8 @@ oidn_run_lightmap_filter :: proc(device: oidn.Device, filter: oidn.Filter, color
         tile_count_y := (lightmap_size + DENOISE_TILE_SIZE - 1) / DENOISE_TILE_SIZE
 
         // Lots of stuff in OIDN to do to get tiled denoising to work...
-        ty := tile_idx^ / tile_count_x
-        tx := tile_idx^ % tile_count_x
+        ty := bake.denoise_tile_idx / tile_count_x
+        tx := bake.denoise_tile_idx % tile_count_x
 
         inner_x0: int = int(tx * DENOISE_TILE_SIZE)
         inner_y0: int = int(ty * DENOISE_TILE_SIZE)
@@ -869,24 +894,24 @@ oidn_run_lightmap_filter :: proc(device: oidn.Device, filter: oidn.Filter, color
 
         byte_offset := (t_y0 * int(lightmap_size) + t_x0) * int(bytes_per_pixel)
 
-        oidn.SetFilterImage(filter, "color",  color,  .HALF3, uint(tile_w), uint(tile_h),
+        oidn.SetFilterImage(bake.filter, "color", bake.shared_buf_oidn, .HALF3, uint(tile_w), uint(tile_h),
                             byteOffset = uint(byte_offset),
                             pixelByteStride = uint(bytes_per_pixel), rowByteStride = uint(bytes_per_pixel * lightmap_size))
-        oidn.SetFilterImage(filter, "output", output, .HALF3, uint(tile_w), uint(tile_h),
+        oidn.SetFilterImage(bake.filter, "output", bake.shared_buf_oidn, .HALF3, uint(tile_w), uint(tile_h),
                             byteOffset = uint(byte_offset),
                             pixelByteStride = uint(bytes_per_pixel), rowByteStride = uint(bytes_per_pixel * lightmap_size))
-        oidn.CommitFilter(filter)
-        oidn_check(device)
+        oidn.CommitFilter(bake.filter)
+        oidn_check(bake.ctx.oidn_device)
 
-        oidn.ExecuteFilterAsync(filter)
-        oidn_check(device)
+        oidn.ExecuteFilterAsync(bake.filter)
+        oidn_check(bake.ctx.oidn_device)
 
-        tile_idx^ = (tile_idx^ + 1) % (tile_count_x * tile_count_y)
+        bake.denoise_tile_idx = (bake.denoise_tile_idx + 1) % (tile_count_x * tile_count_y)
     }
     else
     {
-        oidn.ExecuteFilterAsync(filter)
-        oidn_check(device)
+        oidn.ExecuteFilterAsync(bake.filter)
+        oidn_check(bake.ctx.oidn_device)
     }
 }
 

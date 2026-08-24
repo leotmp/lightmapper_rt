@@ -177,6 +177,11 @@ Bake :: struct
     max_samples: u32,
 }
 
+Bake_Params :: struct
+{
+    
+}
+
 Instance :: struct
 {
     mesh_handle: Mesh_Handle,
