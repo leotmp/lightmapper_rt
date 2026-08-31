@@ -1,0 +1,42 @@
+
+Data :: struct
+{
+    // Vert attributes
+    verts: []vec2,
+    chart_indices: []uint,
+
+    // Lightmapping
+    lm_charts: []Chart,
+    chart_base: uint,
+
+    // Pan/Zoom
+    scale: vec2,
+    translate: vec2,
+}
+
+Chart :: struct
+{
+    offset: vec2,
+}
+
+Output :: struct
+{
+    pos: vec4 @position,
+}
+
+vert :: #vertex (data: ^Data @data, vert_id: uint @vert_id) -> Output
+{
+    uv := data.verts[vert_id];
+    chart_idx := data.chart_indices[vert_id];
+    chart := data.lm_charts[data.chart_base + chart_idx];
+    trans_uv := uv + chart.offset;
+
+    out: Output;
+    out.pos = vec4(trans_uv * data.scale + data.translate, 0, 1);
+    return out;
+}
+
+main :: () -> vec4 @io(0)
+{
+    return vec4(1, 1, 1, 0.5);
+}

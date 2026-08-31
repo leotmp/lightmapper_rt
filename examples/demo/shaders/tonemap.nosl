@@ -1,12 +1,37 @@
 
-Data :: struct
+Vertex :: struct
+{
+    pos: vec3,
+    uv: vec2,
+}
+
+Vert_Data :: struct
+{
+    verts: []Vertex,
+}
+
+Output :: struct
+{
+    pos: vec4 @position,
+    uv: vec2 @io(0),
+}
+
+vert :: #vertex (vert_id: uint @vert_id, data: ^Vert_Data @data) -> Output
+{
+    vert_out: Output;
+    vert_out.pos = vec4(data.verts[vert_id].pos.xyz, 1.0);
+    vert_out.uv = data.verts[vert_id].uv;
+    return vert_out;
+}
+
+Frag_Data :: struct
 {
     texture_id: texture_id,
     sampler_id: sampler_id,
     exposure: float,
 }
 
-main :: (uv: vec2 @io(0), data: ^Data @data) -> vec4 @io(0)
+frag :: #fragment (uv: vec2 @io(0), data: ^Frag_Data @data) -> vec4 @io(0)
 {
     linear := texture_sample(data.texture_id, data.sampler_id, uv);
     if data.exposure != 0 {
@@ -35,3 +60,4 @@ hdr_to_ldr :: (color: vec4) -> vec4
 {
     return vec4(filmic(color.xyz), color.w);
 }
+

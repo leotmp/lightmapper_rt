@@ -22,7 +22,6 @@ import gltf2 "../shared/gltf2"
 
 import vk "vendor:vulkan"
 import "../../no_gfx_api/gpu"
-import xa "../shared/xatlas_odin"
 
 import imgui "../shared/odin-imgui"
 import imgui_impl_sdl3 "../shared/odin-imgui/imgui_impl_sdl3"
@@ -63,15 +62,6 @@ upload_sem_val: u64
 
 main :: proc()
 {
-    if len(os.args) > 1 {
-        fmt.println("aaah")
-        fmt.println("aaah")
-        fmt.println("aaah")
-        fmt.println("aaah")
-        fmt.println("aaah")
-        fmt.println("aaah")
-    }
-
     ok_i := sdl.Init({.VIDEO})
     assert(ok_i)
 
@@ -154,9 +144,6 @@ main :: proc()
         shared.destroy_scene(&gltf_scene)
         gltf2.unload(gltf_data)
     }
-    lm_uvs := generate_lm_uvs(&gltf_scene)
-    defer destroy_lm_uvs(&lm_uvs)
-
     defer {
         // Clean up loaded textures
         sync.guard(&mutex)
@@ -235,7 +222,7 @@ main :: proc()
     lm.init(&lm_ctx, &desc_pool)
     defer lm.cleanup(&lm_ctx)
 
-    scene := upload_scene(gltf_scene, &lm_ctx, lm_uvs, &upload_arena, &bvh_scratch_arena, upload_cmd_buf)
+    scene := upload_scene(gltf_scene, &lm_ctx, &upload_arena, &bvh_scratch_arena, upload_cmd_buf)
     defer scene_destroy(&scene)
 
     anisotropy := min(16.0, gpu.device_limits().max_anisotropy)
@@ -328,7 +315,7 @@ main :: proc()
         if old_window_size_x != window_size_x || old_window_size_y != window_size_y
         {
             gpu.queue_wait_idle(.Main)
-            gpu.swapchain_resize({u32(max(0, window_size_x)), u32(max(0, window_size_y))})
+            gpu.swapchain_resize({u32(window_size_x), u32(window_size_y)})
 
             gpu.texture_free_and_destroy(&color_target)
             gpu.texture_free_and_destroy(&postprocess_target)
@@ -345,6 +332,10 @@ main :: proc()
         mask_out_dear_imgui_inputs()
 
         swapchain := gpu.swapchain_acquire_next() // Blocks CPU until at least one frame is available.
+        if swapchain == {} {
+            gpu.swapchain_resize({u32(window_size_x), u32(window_size_y)})
+            continue
+        }
 
         last_ts := now_ts
         now_ts = sdl.GetPerformanceCounter()
@@ -362,14 +353,21 @@ main :: proc()
         gpu.cmd_set_desc_heap(cmd_buf, desc_pool)
 
         draw_calls := make([dynamic]UV_Mesh_Draw_Call, allocator = context.temp_allocator)
-        for mesh_idx in 0..<len(scene.meshes) {
+        for instance, instance_idx in gltf_scene.instances
+        {
+            mesh_idx := instance.mesh_idx
+            mesh := scene.meshes[mesh_idx]
+
             append(&draw_calls, UV_Mesh_Draw_Call {
                 vert_shader = vert_shader_uv_debug_viz,
                 frag_shader = frag_shader_uv_debug_viz,
                 cmd_buf = cmd_buf,
                 staging_arena = frame_arena,
-                verts = scene.lm_uvs[mesh_idx],
+                verts = scene.meshes[mesh_idx].lm_uvs,
                 indices = scene.meshes[mesh_idx].indices,
+                lm_chart_indices = scene.meshes[mesh_idx].lm_chart_indices,
+                lm_charts = scene.lm_charts,
+                chart_base = instance.lm_chart_base,
                 offset = {},
                 scale = {},
             })
@@ -429,9 +427,10 @@ main :: proc()
 
                 gpu.cmd_set_depth_state(cmd_buf, {mode = {.Read, .Write}, compare = .Less})
 
-                for instance in gltf_scene.instances
+                for instance, instance_idx in gltf_scene.instances
                 {
-                    mesh := scene.meshes[instance.mesh_idx]
+                    mesh_idx := instance.mesh_idx
+                    mesh := scene.meshes[mesh_idx]
                     base_color_map := gltf_scene.meshes[instance.mesh_idx].base_color_map
                     metallic_roughness_map := gltf_scene.meshes[instance.mesh_idx].metallic_roughness_map
                     normal_map := gltf_scene.meshes[instance.mesh_idx].normal_map
@@ -440,22 +439,30 @@ main :: proc()
                         positions:             rawptr,
                         normals:               rawptr,
                         uvs:                   rawptr,
-                        lm_uvs:                rawptr,
+                        unique_lm_uvs:         rawptr,
+                        instanced_lm_uvs:      rawptr,
+                        instanced_lm_uvs_offset: [2]f32,
+                        instanced_lm_uvs_scale:  [2]f32,
                         model_to_world:        [16]f32,
                         model_to_world_normal: [16]f32,
                         world_to_view:         [16]f32,
                         view_to_proj:          [16]f32,
+                        is_instanced: b32,
                     }
                     verts_data := gpu.arena_alloc(frame_arena, Vert_Data)
                     verts_data.cpu^ = {
                         positions             = mesh.pos.gpu.ptr,
                         normals               = mesh.normals.gpu.ptr,
                         uvs                   = mesh.uvs.gpu.ptr,
-                        lm_uvs                = scene.lm_uvs[instance.mesh_idx].gpu.ptr,
+                        unique_lm_uvs         = mesh.lm_uvs.gpu.ptr,
+                        instanced_lm_uvs      = {}, //scene.instanced_lm_uvs[instance.mesh_idx],
+                        instanced_lm_uvs_offset = {},
+                        instanced_lm_uvs_scale = {},
                         model_to_world        = intr.matrix_flatten(instance.transform),
                         model_to_world_normal = intr.matrix_flatten(linalg.transpose(linalg.inverse(instance.transform))),
                         world_to_view         = intr.matrix_flatten(world_to_view),
                         view_to_proj          = intr.matrix_flatten(view_to_proj),
+                        is_instanced          = false,
                     }
 
                     lm_sampler: u32
@@ -574,6 +581,8 @@ Mesh_GPU :: struct
     pos: gpu.slice_t([3]f32),
     normals: gpu.slice_t([3]f32),
     uvs: gpu.slice_t([2]f32),
+    lm_uvs: gpu.slice_t([2]f32),
+    lm_chart_indices: gpu.slice_t(i32),
     indices: gpu.slice_t(u32),
     idx_count: u32,
     vert_count: u32,
@@ -590,20 +599,28 @@ upload_mesh :: proc(upload_arena: ^gpu.Arena, cmd_buf: gpu.Command_Buffer, mesh:
     positions_staging := gpu.arena_alloc(upload_arena, [3]f32, len(mesh.pos))
     normals_staging := gpu.arena_alloc(upload_arena, [3]f32, len(mesh.normals))
     uvs_staging := gpu.arena_alloc(upload_arena, [2]f32, len(mesh.uvs))
+    lm_uvs_staging := gpu.arena_alloc(upload_arena, [2]f32, len(mesh.lm_uvs))
+    chart_indices_staging := gpu.arena_alloc(upload_arena, i32, len(mesh.lm_chart_indices))
     indices_staging := gpu.arena_alloc(upload_arena, u32, len(mesh.indices))
     copy(positions_staging.cpu, mesh.pos[:])
     copy(normals_staging.cpu, mesh.normals[:])
     copy(uvs_staging.cpu, mesh.uvs[:])
+    copy(lm_uvs_staging.cpu, mesh.lm_uvs[:])
+    copy(chart_indices_staging.cpu, mesh.lm_chart_indices[:])
     copy(indices_staging.cpu, mesh.indices[:])
 
     res: Mesh_GPU
     res.pos = gpu.mem_alloc([3]f32, len(mesh.pos), mem_type = gpu.Memory.GPU)
     res.normals = gpu.mem_alloc([3]f32, len(mesh.normals), mem_type = gpu.Memory.GPU)
     res.uvs = gpu.mem_alloc([2]f32, len(mesh.uvs), mem_type = gpu.Memory.GPU)
+    res.lm_uvs = gpu.mem_alloc([2]f32, len(mesh.lm_uvs), mem_type = gpu.Memory.GPU)
+    res.lm_chart_indices = gpu.mem_alloc(i32, len(mesh.lm_chart_indices), mem_type = gpu.Memory.GPU)
     res.indices = gpu.mem_alloc(u32, len(mesh.indices), mem_type = gpu.Memory.GPU)
     gpu.cmd_mem_copy(cmd_buf, res.pos, positions_staging)
     gpu.cmd_mem_copy(cmd_buf, res.normals, normals_staging)
     gpu.cmd_mem_copy(cmd_buf, res.uvs, uvs_staging)
+    gpu.cmd_mem_copy(cmd_buf, res.lm_uvs, lm_uvs_staging)
+    gpu.cmd_mem_copy(cmd_buf, res.lm_chart_indices, chart_indices_staging)
     gpu.cmd_mem_copy(cmd_buf, res.indices, indices_staging)
 
     res.idx_count = u32(len(mesh.indices))
@@ -617,6 +634,7 @@ mesh_destroy :: proc(mesh: ^Mesh_GPU)
     gpu.mem_free(mesh.pos)
     gpu.mem_free(mesh.normals)
     gpu.mem_free(mesh.uvs)
+    gpu.mem_free(mesh.lm_uvs)
     gpu.mem_free(mesh.indices)
     mesh^ = {}
 }
@@ -655,10 +673,8 @@ build_tlas :: proc(bvh_scratch_arena: ^gpu.Arena, cmd_buf: gpu.Command_Buffer, i
 
 Scene_GPU :: struct
 {
-    // bvh: gpu.Owned_BVH,
     meshes: [dynamic]Mesh_GPU,
-    instances_bvh: gpu.slice_t(gpu.BVH_Instance),
-    lm_uvs: [dynamic]gpu.slice_t([2]f32),
+    lm_charts: gpu.slice_t(shared.Lightmap_Chart),
 }
 
 Scene_Shader :: struct
@@ -675,7 +691,7 @@ Lights_Shader :: struct
     dir_light_emission: [3]f32,
 }
 
-upload_scene :: proc(scene: shared.Scene, lm_ctx: ^lm.Context, lm_uvs: [dynamic]Lightmap_UVs, upload_arena: ^gpu.Arena, bvh_scratch_arena: ^gpu.Arena, cmd_buf: gpu.Command_Buffer) -> Scene_GPU
+upload_scene :: proc(scene: shared.Scene, lm_ctx: ^lm.Context, upload_arena: ^gpu.Arena, bvh_scratch_arena: ^gpu.Arena, cmd_buf: gpu.Command_Buffer) -> Scene_GPU
 {
     res: Scene_GPU
 
@@ -686,22 +702,20 @@ upload_scene :: proc(scene: shared.Scene, lm_ctx: ^lm.Context, lm_uvs: [dynamic]
         append(&res.meshes, to_add)
     }
 
-    for uvs in lm_uvs
+    // Upload lm chart infos
     {
-        uvs_staging := gpu.arena_alloc(upload_arena, [2]f32, len(uvs.uvs))
-        copy(uvs_staging.cpu, uvs.uvs[:])
+        staging := gpu.arena_alloc(upload_arena, shared.Lightmap_Chart, len(scene.lm_charts))
+        copy(staging.cpu, scene.lm_charts[:])
 
-        uvs_gpu := gpu.mem_alloc([2]f32, len(uvs.uvs), gpu.Memory.GPU)
-        gpu.cmd_mem_copy(cmd_buf, uvs_gpu, uvs_staging)
-        append(&res.lm_uvs, uvs_gpu)
+        res.lm_charts = gpu.mem_alloc(shared.Lightmap_Chart, len(scene.lm_charts), mem_type = gpu.Memory.GPU)
+        gpu.cmd_mem_copy(cmd_buf, res.lm_charts, staging)
     }
 
-    // Build BVHs
     gpu.cmd_barrier(cmd_buf, .Transfer, .All)
     for &mesh, i in res.meshes
     {
         mesh_cpu := scene.meshes[i]
-        mesh_lm_uvs := lm_uvs[i]
+        mesh_lm_uvs := mesh_cpu.lm_uvs
 
         mesh.lm_mesh_handle = lm.add_mesh(lm_ctx, cmd_buf, lm.Mesh_Desc {
             positions_gpu = mesh.pos,
@@ -713,10 +727,10 @@ upload_scene :: proc(scene: shared.Scene, lm_ctx: ^lm.Context, lm_uvs: [dynamic]
         mesh.lm_uv_handle = lm.add_lightmap_uvs(lm_ctx, cmd_buf, lm.Lightmap_UVs_Desc {
             positions_cpu = mesh_cpu.pos[:],
             normals_cpu = mesh_cpu.normals[:],
-            lm_uvs_cpu = mesh_lm_uvs.uvs[:],
+            lm_uvs_cpu = mesh_cpu.lm_uvs[:],
             indices_cpu = mesh_cpu.indices[:],
 
-            lm_uvs_gpu = res.lm_uvs[i],
+            lm_uvs_gpu = mesh.lm_uvs,
         })
     }
 
@@ -729,10 +743,8 @@ scene_destroy :: proc(scene: ^Scene_GPU)
         mesh_destroy(&mesh)
     }
     delete(scene.meshes)
-    for &lm_uvs in scene.lm_uvs {
-        gpu.mem_free(lm_uvs)
-    }
-    delete(scene.lm_uvs)
+
+    gpu.mem_free(scene.lm_charts)
 
     scene^ = {}
 }
@@ -1392,6 +1404,10 @@ UV_Mesh_Draw_Call :: struct #all_or_none
     staging_arena: ^gpu.Arena,
     verts: gpu.slice_t([2]f32),
     indices: gpu.slice_t(u32),
+    lm_chart_indices: gpu.slice_t(i32),
+
+    lm_charts: gpu.slice_t(shared.Lightmap_Chart),
+    chart_base: u32,
 
     offset: [2]f32,
     scale: [2]f32,
@@ -1405,14 +1421,24 @@ draw_uv_mesh_callback :: proc "c"(draw_list: ^imgui.Draw_List, cmd: ^imgui.Draw_
 
     gpu.cmd_set_shaders(data.cmd_buf, data.vert_shader, data.frag_shader)
 
-    Vert_Data :: struct {
+    Vert_Data :: struct #all_or_none {
         verts: rawptr,
+        chart_indices: rawptr,
+
+        lm_charts: rawptr,
+        chart_base: u32,
+
         scale: [2]f32,
         translate: [2]f32,
     }
     vert_data := gpu.arena_alloc(data.staging_arena, Vert_Data)
     vert_data.cpu^ = Vert_Data {
         verts = data.verts.gpu.ptr,
+        chart_indices = data.lm_chart_indices.ptr,
+
+        lm_charts = data.lm_charts.ptr,
+        chart_base = data.chart_base,
+
         scale = data.scale,
         translate = data.offset
     }
@@ -1430,87 +1456,13 @@ rgba8_to_u32 :: proc(r: u8, g: u8, b: u8, a: u8) -> u32
 Lightmap_UVs :: struct
 {
     uvs: [dynamic][2]f32,
+    chart_indices: [dynamic]u32,
 }
 
-generate_lm_uvs :: proc(scene: ^shared.Scene) -> [dynamic]Lightmap_UVs
+Transform_2D :: struct
 {
-    fmt.println("XAtlas: Begin...")
-    defer fmt.println("XAtlas: End!")
-
-    atlas := xa.Create()
-    defer xa.Destroy(atlas)
-
-    lm_uvs: [dynamic]Lightmap_UVs
-
-    for mesh in scene.meshes
-    {
-        mesh_decl := xa.make_mesh_decl()
-        mesh_decl.vertexPositionData = raw_data(mesh.pos)
-        mesh_decl.vertexNormalData = raw_data(mesh.normals)
-        mesh_decl.vertexUvData = raw_data(mesh.uvs)
-        mesh_decl.indexData = raw_data(mesh.indices)
-        mesh_decl.vertexCount = u32(len(mesh.pos))
-        mesh_decl.vertexPositionStride = size_of(mesh.pos[0])
-        mesh_decl.vertexNormalStride = size_of(mesh.normals[0])
-        mesh_decl.vertexUvStride = size_of(mesh.uvs[0])
-        mesh_decl.indexCount = u32(len(mesh.indices))
-        mesh_decl.indexFormat = .UInt32
-
-        res := xa.AddMesh(atlas, mesh_decl, 0)
-        if res != .SUCCESS {
-            fmt.printfln("XAtlas Error: %v", xa.StringForEnum(res))
-            return {}
-        }
-    }
-
-    pack_options := xa.make_pack_options()
-    pack_options.blockAlign = true
-    pack_options.resolution = 4096
-    pack_options.padding = 2
-    pack_options.bilinear = true
-    xa.Generate(atlas, xa.make_chart_options(), pack_options)
-
-    for &mesh, mesh_idx in scene.meshes
-    {
-        new_mesh := shared.Mesh {
-            pos = make(type_of(mesh.pos), atlas.meshes[mesh_idx].vertexCount),
-            normals = make(type_of(mesh.normals), atlas.meshes[mesh_idx].vertexCount),
-            uvs = make(type_of(mesh.uvs), atlas.meshes[mesh_idx].vertexCount),
-            indices = make(type_of(mesh.indices), atlas.meshes[mesh_idx].indexCount),
-            base_color_map = mesh.base_color_map,
-            metallic_roughness_map = mesh.metallic_roughness_map,
-            normal_map = mesh.normal_map,
-        }
-        defer {
-            shared.destroy_mesh(&mesh)
-            mesh = new_mesh
-        }
-
-        uvs := Lightmap_UVs {
-            uvs = make([dynamic][2]f32, atlas.meshes[mesh_idx].vertexCount)
-        }
-        append(&lm_uvs, uvs)
-
-        xa_mesh := atlas.meshes[mesh_idx]
-
-        for xa_vert, xa_vert_idx in xa_mesh.vertexArray[:xa_mesh.vertexCount]
-        {
-            old_idx := xa_vert.xref
-            new_mesh.pos[xa_vert_idx] = mesh.pos[old_idx]
-            new_mesh.normals[xa_vert_idx] = mesh.normals[old_idx]
-            new_mesh.uvs[xa_vert_idx] = mesh.uvs[old_idx]
-
-            lm_uvs[mesh_idx].uvs[xa_vert_idx] = {
-                xa_vert.uv[0] / f32(atlas.width),
-                xa_vert.uv[1] / f32(atlas.height),
-            }
-
-        }
-
-        copy(new_mesh.indices[:], xa_mesh.indexArray[:xa_mesh.indexCount])
-    }
-
-    return lm_uvs
+    offset: [2]f32,
+    scale: [2]f32,
 }
 
 destroy_lm_uvs :: proc(lm_uvs: ^[dynamic]Lightmap_UVs)
