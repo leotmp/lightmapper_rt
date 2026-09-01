@@ -30,6 +30,7 @@ vert :: #vertex (data: ^Data @data, vert_id: uint @vert_id) -> Output
     chart_idx := data.chart_indices[vert_id];
     chart := data.lm_charts[data.chart_base + chart_idx];
     trans_uv := uv + chart.offset;
+    trans_uv /= 4096.0;
 
     out: Output;
     out.pos = vec4(trans_uv * data.scale + data.translate, 0, 1);

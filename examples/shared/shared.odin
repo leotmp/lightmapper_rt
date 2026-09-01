@@ -973,12 +973,12 @@ generate_lightmap_uvs :: proc(scene: ^Scene)
         xa.ComputeCharts(atlas, xa.make_chart_options())
         pack_options := xa.make_pack_options()
         pack_options.blockAlign = true
-        pack_options.resolution = 4096
+        pack_options.texelsPerUnit = 0.3
         pack_options.padding = 1
         pack_options.bilinear = true
         xa.PackCharts(atlas, pack_options)
 
-        assert(atlas.meshCount == 1)
+        ensure(atlas.meshCount == 1)
         xa_mesh := atlas.meshes[0]
 
         // NOTE: The charting process will modify the mesh (duplicate verts for splits)
@@ -1007,8 +1007,8 @@ generate_lightmap_uvs :: proc(scene: ^Scene)
             new_mesh.uvs[xa_vert_idx] = mesh.uvs[old_idx]
 
             new_mesh.lm_uvs[xa_vert_idx] = {
-                xa_vert.uv[0] / f32(atlas.width),
-                xa_vert.uv[1] / f32(atlas.height),
+                xa_vert.uv[0],
+                xa_vert.uv[1],
             }
             new_mesh.lm_chart_indices[xa_vert_idx] = xa_vert.chartIndex
         }
@@ -1049,16 +1049,21 @@ generate_lightmap_uvs :: proc(scene: ^Scene)
 
     pack_options := xa.make_pack_options()
     pack_options.blockAlign = true
+    pack_options.texelsPerUnit = 1
     pack_options.resolution = 4096
     pack_options.padding = 1
     pack_options.bilinear = true
     pack_options.rotateCharts = false
+    pack_options.rotateChartsToAxis = false
     xa.PackCharts(pack_atlas, pack_options)
 
+    ensure(pack_atlas.atlasCount == 1)
+    ensure(pack_atlas.width == 4096)
+    ensure(pack_atlas.height == 4096)
     fmt.println("Done packing charts.")
 
     // Extract the transforms and the chart_idx from the packing.
-    chart_base: u32 = 0
+    chart_base: i32 = 0
     for &instance, instance_idx in scene.instances
     {
         mesh_idx := instance.mesh_idx
@@ -1074,10 +1079,12 @@ generate_lightmap_uvs :: proc(scene: ^Scene)
         {
             if v.chartIndex < 0 do continue
 
-            global_chart := u32(v.chartIndex)
+            global_chart := i32(v.chartIndex)
             local_chart := global_chart - chart_base
 
-            assert(local_chart < packed.chartCount)
+            assert(local_chart < i32(packed.chartCount))
+
+            scene.meshes[mesh_idx].lm_chart_indices[v.xref] = local_chart
 
             if !seen[local_chart]
             {
@@ -1094,7 +1101,7 @@ generate_lightmap_uvs :: proc(scene: ^Scene)
         }
 
         // Store these offsets for this instance.
-        instance.lm_chart_base = chart_base
+        instance.lm_chart_base = u32(chart_base)
 
         for chart_idx in 0..<packed.chartCount
         {
@@ -1104,6 +1111,6 @@ generate_lightmap_uvs :: proc(scene: ^Scene)
             append(&scene.lm_charts, chart)
         }
 
-        chart_base += packed.chartCount
+        chart_base += i32(packed.chartCount)
     }
 }
