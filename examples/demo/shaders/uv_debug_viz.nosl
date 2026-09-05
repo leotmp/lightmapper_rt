@@ -16,6 +16,8 @@ Data :: struct
 
 Chart :: struct
 {
+    x: vec2,
+    y: vec2,
     offset: vec2,
 }
 

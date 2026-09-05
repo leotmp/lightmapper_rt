@@ -13,9 +13,20 @@ Data :: struct
     normals: []vec3,
     uvs: []vec2,
     lightmap_uvs: []vec2,
+    lm_chart_indices: []uint,
+
+    lm_charts: []Chart,
+    lm_chart_base: uint,
     resolution: vec2,
     model_to_world: mat4,
     model_to_world_normals: mat4,
+}
+
+Chart :: struct
+{
+    x: vec2,
+    y: vec2,
+    offset: vec2,
 }
 
 main :: (vert_id: uint @vert_id, instance_id: uint @instance_id, data: ^Data @data) -> Output
@@ -51,10 +62,21 @@ main :: (vert_id: uint @vert_id, instance_id: uint @instance_id, data: ^Data @da
     uv_offset := offsets[instance_id % 25];
     ndc_offset := (uv_offset / data.resolution) / 2.0;
 
+    chart_idx := data.lm_chart_indices[vert_id];
+    chart_base := data.lm_chart_base;
+    lm_uvs := get_lm_uv(data.lm_charts[chart_base + chart_idx], data.lightmap_uvs[vert_id]);
+
     vert_out: Output;
-    vert_out.out_pos = vec4((data.lightmap_uvs[vert_id] * 2 - 1) + ndc_offset, 0, 1);
+    vert_out.out_pos = vec4((lm_uvs * 2 - 1) + ndc_offset, 0, 1);
     vert_out.world_pos = (data.model_to_world * vec4(data.pos[vert_id], 1)).xyz;
     vert_out.world_normal = (data.model_to_world_normals * vec4(data.normals[vert_id], 0)).xyz;
     vert_out.uv = data.uvs[vert_id];
     return vert_out;
+}
+
+get_lm_uv :: (chart: Chart, uv: vec2) -> vec2
+{
+    trans_uv := uv + chart.offset;
+    trans_uv /= 4096.0;
+    return trans_uv;
 }

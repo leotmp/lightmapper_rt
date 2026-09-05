@@ -4,15 +4,23 @@ Data :: struct
     positions: []vec3,
     normals: []vec3,
     uvs: []vec2,
-    unique_lm_uvs: []vec2,
-    instanced_lm_uvs: []vec2,
-    instanced_lm_uvs_offset: vec2,
-    instanced_lm_uvs_scale: vec2,
+    lm_uvs: []vec2,
+    lm_chart_indices: []uint,
+
+    lm_charts: []Chart,
+    lm_chart_base: uint,
+
     model_to_world: mat4,
     model_to_world_normal: mat4,
     world_to_view: mat4,
     view_to_proj: mat4,
-    is_instanced: bool,
+}
+
+Chart :: struct
+{
+    x: vec2,
+    y: vec2,
+    offset: vec2,
 }
 
 Output :: struct
@@ -34,18 +42,22 @@ main :: (vert_id: uint @vert_id, data: ^Data @data) -> Output
 
     world_normal := data.model_to_world_normal * vec4(data.normals[vert_id], 1);
 
-    lm_uv: vec2;
-    if data.is_instanced {
-        lm_uv = data.instanced_lm_uvs[vert_id] * data.instanced_lm_uvs_scale + data.instanced_lm_uvs_offset;
-    } else {
-        lm_uv = data.unique_lm_uvs[vert_id];
-    }
+    chart_idx := data.lm_chart_indices[vert_id];
+    chart_base := data.lm_chart_base;
+    lm_uvs := get_lm_uv(data.lm_charts[chart_base + chart_idx], data.lm_uvs[vert_id]);
 
     vert_out: Output;
     vert_out.pos = clip_pos;
     vert_out.normal = world_normal;
     vert_out.uv = data.uvs[vert_id];
-    vert_out.lm_uv = lm_uv;
+    vert_out.lm_uv = lm_uvs;
     vert_out.world_pos = world_pos;
     return vert_out;
+}
+
+get_lm_uv :: (chart: Chart, uv: vec2) -> vec2
+{
+    trans_uv := uv + chart.offset;
+    trans_uv /= 4096.0;
+    return trans_uv;
 }

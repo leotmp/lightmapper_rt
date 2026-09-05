@@ -937,6 +937,8 @@ CUBE_INDICES := []u32{
 // Lightmap
 Lightmap_Chart :: struct
 {
+    x: [2]f32,
+    y: [2]f32,
     offset: [2]f32,
 }
 
@@ -1061,6 +1063,8 @@ generate_lightmap_uvs :: proc(scene: ^Scene)
     ensure(pack_atlas.width == 4096)
     ensure(pack_atlas.height == 4096)
     fmt.println("Done packing charts.")
+
+    fmt.println("Atlas utilization:", pack_atlas.utilization^)
 
     // Extract the transforms and the chart_idx from the packing.
     chart_base: i32 = 0

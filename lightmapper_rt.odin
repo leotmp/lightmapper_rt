@@ -77,6 +77,9 @@ Mesh_Desc :: struct
     positions_gpu: gpu.slice_t([3]f32),
     normals_gpu:   gpu.slice_t([3]f32),
     uvs_gpu:       gpu.slice_t([2]f32),
+    lm_chart_indices: gpu.slice_t(i32),
+
+    // Must stay alive until the removal of this Mesh_Handle.
     indices_gpu:   gpu.slice_t(u32),
 }
 
@@ -93,6 +96,7 @@ add_mesh :: proc(using ctx: ^Context, cmd_buf: gpu.Command_Buffer, desc: Mesh_De
         positions = desc.positions_gpu,
         normals   = desc.normals_gpu,
         uvs       = desc.uvs_gpu,
+        lm_chart_indices = desc.lm_chart_indices,
         indices   = desc.indices_gpu,
         bvh       = bvh,
     })
@@ -179,7 +183,7 @@ Bake :: struct
 
 Bake_Params :: struct
 {
-    
+
 }
 
 Instance :: struct
@@ -191,9 +195,18 @@ Instance :: struct
     lm_uvs_offset: [2]f32,
     lm_uvs_scale: [2]f32,
 
+    lm_chart_base: u32,
+
     // Material properties
     albedo_tex_id: u32,
     albedo: [3]f32,
+}
+
+Chart :: struct
+{
+    x: [2]f32,
+    y: [2]f32,
+    offset: [2]f32,
 }
 
 Lights :: struct
@@ -203,9 +216,9 @@ Lights :: struct
     sun_emission: [3]f32,  // NOTE: This is total emission across the sun's surface
 }
 
-bake_begin :: proc(ctx: ^Context, #any_int lightmap_size: i64, samples: u32, lightmap: gpu.Texture, instances: []Instance, lights: Lights) -> Bake
+bake_begin :: proc(ctx: ^Context, #any_int lightmap_size: i64, samples: u32, lightmap: gpu.Texture, instances: []Instance, charts: []Chart, lights: Lights) -> Bake
 {
-    return bake_begin_impl(ctx, lightmap_size, samples, lightmap, instances, lights)
+    return bake_begin_impl(ctx, lightmap_size, samples, lightmap, instances, charts, lights)
 }
 
 bake_scene_changed :: proc(bake: ^Bake, instances: []Instance, lights: Lights) -> bool

@@ -25,7 +25,7 @@ import oidn "oidn_odin_bindings"
 DENOISE_TILE_SIZE :: 1024
 DENOISE_TILE_OVERLAP :: 32
 
-bake_begin_impl :: proc(ctx: ^Context, #any_int lightmap_size: i64, samples: u32, lightmap: gpu.Texture, instances: []Instance, lights: Lights) -> Bake
+bake_begin_impl :: proc(ctx: ^Context, #any_int lightmap_size: i64, samples: u32, lightmap: gpu.Texture, instances: []Instance, charts: []Chart, lights: Lights) -> Bake
 {
     assert(lightmap_size > 0)
 
@@ -94,7 +94,7 @@ bake_begin_impl :: proc(ctx: ^Context, #any_int lightmap_size: i64, samples: u32
     bake.scene_gpu.bvh_id = gpu.desc_pool_alloc_bvh(ctx.desc_pool, bake.scene_gpu.bvh)
 
     resolution := [2]f32 { f32(lightmap_size), f32(lightmap_size) }
-    gbufs_render(cmd_buf, &ctx.upload_arena, &bake.gbufs, ctx.shaders, instances, ctx.meshes.resources[:], ctx.lm_uvs.resources[:], resolution)
+    gbufs_render(cmd_buf, &ctx.upload_arena, &bake.gbufs, ctx.shaders, instances, charts, ctx.meshes.resources[:], ctx.lm_uvs.resources[:], resolution)
     gpu.cmd_barrier(cmd_buf, .All, .All, {})
 
     bake.gbufs_id = gpu.desc_pool_alloc_textures_rw(ctx.desc_pool, []gpu.Texture_Descriptor {
@@ -238,6 +238,7 @@ Mesh :: struct
     positions: gpu.slice_t([3]f32),
     normals: gpu.slice_t([3]f32),
     uvs: gpu.slice_t([2]f32),
+    lm_chart_indices: gpu.slice_t(i32),
     indices: gpu.slice_t(u32),
     bvh: gpu.Owned_BVH,  // Owned
 }
@@ -324,7 +325,7 @@ gbufs_destroy :: proc(gbufs: ^GBuffers)
     gbufs^ = {}
 }
 
-gbufs_render :: proc(cmd_buf: gpu.Command_Buffer, upload_arena: ^gpu.Arena, gbufs: ^GBuffers, shaders: Shaders, instances: []Instance, meshes: []Resource(Mesh), lm_uvs: []Resource(LM_UVs), resolution: [2]f32)
+gbufs_render :: proc(cmd_buf: gpu.Command_Buffer, upload_arena: ^gpu.Arena, gbufs: ^GBuffers, shaders: Shaders, instances: []Instance, charts: []Chart, meshes: []Resource(Mesh), lm_uvs: []Resource(LM_UVs), resolution: [2]f32)
 {
     gpu.cmd_scoped_render_pass(cmd_buf, {
         color_attachments = {
@@ -335,6 +336,9 @@ gbufs_render :: proc(cmd_buf: gpu.Command_Buffer, upload_arena: ^gpu.Arena, gbuf
 
     gpu.cmd_set_shaders(cmd_buf, shaders.uv_space, shaders.gbuffers)
     gpu.cmd_set_raster_state(cmd_buf, { cull_mode = .None })
+
+    charts_gpu := gpu.arena_alloc(upload_arena, Chart, len(charts))
+    copy(charts_gpu.cpu, charts)
 
     // Render the entire scene
     for instance in instances
@@ -347,6 +351,10 @@ gbufs_render :: proc(cmd_buf: gpu.Command_Buffer, upload_arena: ^gpu.Arena, gbuf
             normals: rawptr,
             uvs: rawptr,
             lightmap_uvs: rawptr,
+            lm_chart_indices: rawptr,
+
+            lm_charts: rawptr,
+            lm_chart_base: u32,
             resolution: [2]f32,
             model_to_world: [16]f32,
             model_to_world_normals: [16]f32,
@@ -357,6 +365,10 @@ gbufs_render :: proc(cmd_buf: gpu.Command_Buffer, upload_arena: ^gpu.Arena, gbuf
             normals = mesh.info.normals.gpu.ptr,
             uvs = mesh.info.uvs.gpu.ptr,
             lightmap_uvs = lightmap_uvs.gpu.ptr,
+            lm_chart_indices = mesh.info.lm_chart_indices.gpu.ptr,
+
+            lm_charts = charts_gpu.gpu.ptr,
+            lm_chart_base = instance.lm_chart_base,
             resolution = resolution,
             model_to_world = intr.matrix_flatten(instance.transform),
             model_to_world_normals = intr.matrix_flatten(linalg.transpose(linalg.inverse(instance.transform))),

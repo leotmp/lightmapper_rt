@@ -265,11 +265,24 @@ main :: proc()
                 transform = instance.transform,
                 lm_uvs_offset = 0,
                 lm_uvs_scale = { 1.0, 1.0 },
+
+                lm_chart_base = instance.lm_chart_base,
+
                 albedo_tex_id = gltf_mesh.base_color_map,
                 albedo = { 1.0, 1.0, 1.0 },
             }
         }
-        bake = lm.bake_begin(&lm_ctx, LM_SIZE, 3000, lightmap, lm_instances, ui.lights)
+        lm_charts := make([]lm.Chart, len(gltf_scene.lm_charts), allocator = context.temp_allocator)
+        for &lm_chart, i in lm_charts
+        {
+            chart := gltf_scene.lm_charts[i]
+            lm_chart = lm.Chart {
+                x = chart.x,
+                y = chart.y,
+                offset = chart.offset,
+            }
+        }
+        bake = lm.bake_begin(&lm_ctx, LM_SIZE, 3000, lightmap, lm_instances, lm_charts, ui.lights)
     }
     defer lm.bake_destroy(&bake)
 
@@ -394,6 +407,16 @@ main :: proc()
                 albedo_tex_id = gltf_mesh.base_color_map,
                 albedo = { 1.0, 1.0, 1.0 },
             }
+            lm_charts := make([]lm.Chart, len(gltf_scene.lm_charts), allocator = context.temp_allocator)
+            for &lm_chart, i in lm_charts
+            {
+                chart := gltf_scene.lm_charts[i]
+                lm_chart = lm.Chart {
+                    x = chart.x,
+                    y = chart.y,
+                    offset = chart.offset,
+                }
+            }
         }
         if ui.do_reset_bake || lm.bake_scene_changed(&bake, lm_instances, ui.lights) {
             lm.bake_reset(&bake)
@@ -439,30 +462,32 @@ main :: proc()
                         positions:             rawptr,
                         normals:               rawptr,
                         uvs:                   rawptr,
-                        unique_lm_uvs:         rawptr,
-                        instanced_lm_uvs:      rawptr,
-                        instanced_lm_uvs_offset: [2]f32,
-                        instanced_lm_uvs_scale:  [2]f32,
+                        lm_uvs:                rawptr,
+                        lm_chart_indices:      rawptr,
+
+                        lm_charts:             rawptr,
+                        lm_chart_base:         u32,
+
                         model_to_world:        [16]f32,
                         model_to_world_normal: [16]f32,
                         world_to_view:         [16]f32,
                         view_to_proj:          [16]f32,
-                        is_instanced: b32,
                     }
                     verts_data := gpu.arena_alloc(frame_arena, Vert_Data)
                     verts_data.cpu^ = {
                         positions             = mesh.pos.gpu.ptr,
                         normals               = mesh.normals.gpu.ptr,
                         uvs                   = mesh.uvs.gpu.ptr,
-                        unique_lm_uvs         = mesh.lm_uvs.gpu.ptr,
-                        instanced_lm_uvs      = {}, //scene.instanced_lm_uvs[instance.mesh_idx],
-                        instanced_lm_uvs_offset = {},
-                        instanced_lm_uvs_scale = {},
+                        lm_uvs                = mesh.lm_uvs.gpu.ptr,
+                        lm_chart_indices      = mesh.lm_chart_indices.gpu.ptr,
+
+                        lm_charts             = scene.lm_charts.gpu.ptr,
+                        lm_chart_base         = instance.lm_chart_base,
+
                         model_to_world        = intr.matrix_flatten(instance.transform),
                         model_to_world_normal = intr.matrix_flatten(linalg.transpose(linalg.inverse(instance.transform))),
                         world_to_view         = intr.matrix_flatten(world_to_view),
                         view_to_proj          = intr.matrix_flatten(view_to_proj),
-                        is_instanced          = false,
                     }
 
                     lm_sampler: u32
@@ -635,6 +660,7 @@ mesh_destroy :: proc(mesh: ^Mesh_GPU)
     gpu.mem_free(mesh.normals)
     gpu.mem_free(mesh.uvs)
     gpu.mem_free(mesh.lm_uvs)
+    gpu.mem_free(mesh.lm_chart_indices)
     gpu.mem_free(mesh.indices)
     mesh^ = {}
 }
@@ -722,6 +748,7 @@ upload_scene :: proc(scene: shared.Scene, lm_ctx: ^lm.Context, upload_arena: ^gp
             normals_gpu = mesh.normals,
             uvs_gpu = mesh.uvs,
             indices_gpu = mesh.indices,
+            lm_chart_indices = mesh.lm_chart_indices,
         })
 
         mesh.lm_uv_handle = lm.add_lightmap_uvs(lm_ctx, cmd_buf, lm.Lightmap_UVs_Desc {
@@ -1628,6 +1655,66 @@ ui_update :: proc(ui: ^UI_State, debug_viz_draw_calls: []UV_Mesh_Draw_Call, text
 
                 ui.do_reset_bake = false
                 if imgui.button("Reset Bake") do ui.do_reset_bake = true
+            }
+
+            imgui.separator_text("Edit static entities")
+            when false
+            {
+                Cube_Instance_UI :: struct {
+                    position: [3]f32,
+                    rotation: [3]f32,
+                    scale:    [3]f32,
+                }
+
+                @(static) test_instances := []Cube_Instance_UI {
+                    {
+                        position = { 0, 0, 0 },
+                        rotation = { 0, 0, 0 },
+                        scale    = { 1, 1, 1 },
+                    },
+                    {
+                        position = { 2.5, 0.5, -1 },
+                        rotation = { 0, 45, 0 },
+                        scale    = { 1, 2, 1 },
+                    },
+                    {
+                        position = { -3, 1, 2 },
+                        rotation = { 15, 0, 30 },
+                        scale    = { 0.5, 0.5, 0.5 },
+                    },
+                }
+
+                for instance, idx in test_instances
+                {
+                    imgui.push_id_int(idx)
+
+                    label := fmt.tprintf("Cube %d", idx + 1)
+
+                    if imgui.collapsing_header(label)
+                    {
+                        imgui.same_line()
+                        if imgui.small_button("X") {
+                            // Delete instance.
+                        }
+
+                        imgui.drag_float3("Position", &instance.position[0], 0.05)
+                        imgui.drag_float3("Rotation", &instance.rotation[0], 0.5)
+                        imgui.drag_float3("Scale",    &instance.scale[0],    0.05, 0.001)
+                    }
+                    else
+                    {
+                        imgui.same_line()
+                        if imgui.small_button("X") {
+                            // Delete instance.
+                        }
+                    }
+
+                    imgui.pop_id()
+                }
+
+                if imgui.button("+") {
+                    // Add cube instance.
+                }
             }
 
             imgui.separator_text("Postprocessing settings")
