@@ -76,7 +76,6 @@ main :: (vert_id: uint @vert_id, instance_id: uint @instance_id, data: ^Data @da
 
 get_lm_uv :: (chart: Chart, uv: vec2) -> vec2
 {
-    trans_uv := uv + chart.offset;
-    trans_uv /= 4096.0;
+    trans_uv := chart.x * uv.x + chart.y * uv.y + chart.offset;
     return trans_uv;
 }

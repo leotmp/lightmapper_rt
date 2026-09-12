@@ -25,16 +25,17 @@ import oidn "oidn_odin_bindings"
 DENOISE_TILE_SIZE :: 1024
 DENOISE_TILE_OVERLAP :: 32
 
-bake_begin_impl :: proc(ctx: ^Context, #any_int lightmap_size: i64, samples: u32, lightmap: gpu.Texture, instances: []Instance, charts: []Chart, lights: Lights) -> Bake
+bake_begin_impl :: proc(ctx: ^Context, lightmap_size: [2]i32, samples: u32, lightmap: gpu.Texture, instances: []Instance, charts: []Chart, lights: Lights) -> Bake
 {
-    assert(lightmap_size > 0)
+    assert(lightmap_size.x > 0)
+    assert(lightmap_size.y > 0)
 
     bake: Bake
     bake.ctx = ctx
     bake.gbufs = gbufs_create(lightmap_size)
     bake.instances = slice.clone_to_dynamic(instances)
     bake.lights = lights
-    bake.lightmap_size = u32(lightmap_size)
+    bake.lightmap_size = lightmap_size
     bake.lightmap = lightmap
     bake.max_samples = samples
 
@@ -43,25 +44,25 @@ bake_begin_impl :: proc(ctx: ^Context, #any_int lightmap_size: i64, samples: u32
 
     bake.pathtrace_output = gpu.texture_alloc_and_create({
         format = .RGBA16_Float,
-        dimensions = { u32(lightmap_size), u32(lightmap_size), 1 },
+        dimensions = { u32(lightmap_size.x), u32(lightmap_size.y), 1 },
         usage = { .Sampled, .Storage, .Transfer_Src, .Color_Attachment }
     })
     bake.pathtrace_output_rw_id = gpu.desc_pool_alloc_texture_rw(ctx.desc_pool, gpu.texture_rw_view_descriptor(bake.pathtrace_output, {}))
 
     bake.tmp_tex = gpu.texture_alloc_and_create({
         format = .RGBA16_Float,
-        dimensions = { u32(lightmap_size), u32(lightmap_size), 1 },
+        dimensions = { u32(lightmap_size.x), u32(lightmap_size.y), 1 },
         usage = { .Sampled, .Storage, .Transfer_Src, .Color_Attachment }
     })
     bake.tmp_tex_id = gpu.desc_pool_alloc_texture(ctx.desc_pool, gpu.texture_view_descriptor(bake.tmp_tex, {}))
     bake.tmp_tex_rw_id = gpu.desc_pool_alloc_texture_rw(ctx.desc_pool, gpu.texture_rw_view_descriptor(bake.tmp_tex, {}))
 
-    bake.shared_buf_vk = create_vk_external_buffer_for_oidn(u32(lightmap_size * lightmap_size * 2 * 4))  // TODO: What about other formats?
+    bake.shared_buf_vk = create_vk_external_buffer_for_oidn(u32(lightmap_size.x * lightmap_size.y * 2 * 4))  // TODO: What about other formats?
     bake.shared_buf_oidn = oidn_shared_buffer_from_vk_buffer(ctx.oidn_device, bake.shared_buf_vk)
     shared_sem_vk := create_vk_external_semaphore_for_oidn()
     bake.shared_sem_oidn = oidn_shared_semaphore_from_vk_semaphore(ctx.oidn_device, shared_sem_vk)
     bake.shared_sem_nogfx = gpu.vk_move_semaphore(shared_sem_vk.vk_sem)
-    bake.filter = oidn_create_lightmap_filter(ctx.oidn_device, bake.shared_buf_oidn, bake.shared_buf_oidn, u32(lightmap_size), .HIGH)
+    bake.filter = oidn_create_lightmap_filter(ctx.oidn_device, bake.shared_buf_oidn, bake.shared_buf_oidn, lightmap_size, .HIGH)
 
     cmd_buf := gpu.commands_begin(.Main)
 
@@ -93,7 +94,7 @@ bake_begin_impl :: proc(ctx: ^Context, #any_int lightmap_size: i64, samples: u32
 
     bake.scene_gpu.bvh_id = gpu.desc_pool_alloc_bvh(ctx.desc_pool, bake.scene_gpu.bvh)
 
-    resolution := [2]f32 { f32(lightmap_size), f32(lightmap_size) }
+    resolution := [2]f32 { f32(lightmap_size.x), f32(lightmap_size.y) }
     gbufs_render(cmd_buf, &ctx.upload_arena, &bake.gbufs, ctx.shaders, instances, charts, ctx.meshes.resources[:], ctx.lm_uvs.resources[:], resolution)
     gpu.cmd_barrier(cmd_buf, .All, .All, {})
 
@@ -116,7 +117,7 @@ bake_iteration_impl :: proc(bake: ^Bake, frame_arena: ^gpu.Arena, instances: []I
 
     if bake.accum_counter >= bake.max_samples do return
 
-    resolution := [2]f32 { f32(bake.lightmap_size), f32(bake.lightmap_size) }
+    resolution := [2]f32 { f32(bake.lightmap_size.x), f32(bake.lightmap_size.y) }
 
     if !denoise_on_preview {
         bake.denoise_tile_idx = 0
@@ -302,16 +303,16 @@ GBuffers :: struct
     world_normals: gpu.Owned_Texture,
 }
 
-gbufs_create :: proc(#any_int lightmap_size: i64) -> GBuffers
+gbufs_create :: proc(lightmap_size: [2]i32) -> GBuffers
 {
     gbufs: GBuffers
     gbufs.world_pos = gpu.texture_alloc_and_create({
-        dimensions = { u32(lightmap_size), u32(lightmap_size), 1 },
+        dimensions = { u32(lightmap_size.x), u32(lightmap_size.y), 1 },
         format = .RGBA32_Float,
         usage = { .Color_Attachment, .Sampled, .Storage },
     })
     gbufs.world_normals = gpu.texture_alloc_and_create({
-        dimensions = { u32(lightmap_size), u32(lightmap_size), 1 },
+        dimensions = { u32(lightmap_size.x), u32(lightmap_size.y), 1 },
         format = .RGBA8_Unorm,
         usage = { .Color_Attachment, .Sampled, .Storage }
     })
@@ -883,42 +884,23 @@ oidn_run_lightmap_filter :: proc(bake: ^Bake)
     TILED :: true
     when TILED
     {
-        bytes_per_pixel := u32(2 * 4)
+        bytes_per_pixel := i32(2 * 4)
+        tile := get_denoise_tile_info(bake.denoise_tile_idx, bake.lightmap_size, bytes_per_pixel)
+        tile_count := get_tile_count(bake.lightmap_size)
 
-        tile_count_x := (lightmap_size + DENOISE_TILE_SIZE - 1) / DENOISE_TILE_SIZE
-        tile_count_y := (lightmap_size + DENOISE_TILE_SIZE - 1) / DENOISE_TILE_SIZE
-
-        // Lots of stuff in OIDN to do to get tiled denoising to work...
-        ty := bake.denoise_tile_idx / tile_count_x
-        tx := bake.denoise_tile_idx % tile_count_x
-
-        inner_x0: int = int(tx * DENOISE_TILE_SIZE)
-        inner_y0: int = int(ty * DENOISE_TILE_SIZE)
-        inner_x1: int = clamp(inner_x0 + DENOISE_TILE_SIZE, 0, int(lightmap_size))
-        inner_y1: int = clamp(inner_y0 + DENOISE_TILE_SIZE, 0, int(lightmap_size))
-
-        t_x0 := clamp(inner_x0 - DENOISE_TILE_OVERLAP, 0, int(lightmap_size))
-        t_y0 := clamp(inner_y0 - DENOISE_TILE_OVERLAP, 0, int(lightmap_size))
-        t_x1 := clamp(inner_x1 + DENOISE_TILE_OVERLAP, 0, int(lightmap_size))
-        t_y1 := clamp(inner_y1 + DENOISE_TILE_OVERLAP, 0, int(lightmap_size))
-        tile_w := t_x1 - t_x0
-        tile_h := t_y1 - t_y0
-
-        byte_offset := (t_y0 * int(lightmap_size) + t_x0) * int(bytes_per_pixel)
-
-        oidn.SetFilterImage(bake.filter, "color", bake.shared_buf_oidn, .HALF3, uint(tile_w), uint(tile_h),
-                            byteOffset = uint(byte_offset),
-                            pixelByteStride = uint(bytes_per_pixel), rowByteStride = uint(bytes_per_pixel * lightmap_size))
-        oidn.SetFilterImage(bake.filter, "output", bake.shared_buf_oidn, .HALF3, uint(tile_w), uint(tile_h),
-                            byteOffset = uint(byte_offset),
-                            pixelByteStride = uint(bytes_per_pixel), rowByteStride = uint(bytes_per_pixel * lightmap_size))
+        oidn.SetFilterImage(bake.filter, "color", bake.shared_buf_oidn, .HALF3, uint(tile.width), uint(tile.height),
+                            byteOffset = uint(tile.byte_offset),
+                            pixelByteStride = uint(bytes_per_pixel), rowByteStride = uint(bytes_per_pixel * lightmap_size.x))
+        oidn.SetFilterImage(bake.filter, "output", bake.shared_buf_oidn, .HALF3, uint(tile.width), uint(tile.height),
+                            byteOffset = uint(tile.byte_offset),
+                            pixelByteStride = uint(bytes_per_pixel), rowByteStride = uint(bytes_per_pixel * lightmap_size.x))
         oidn.CommitFilter(bake.filter)
         oidn_check(bake.ctx.oidn_device)
 
         oidn.ExecuteFilterAsync(bake.filter)
         oidn_check(bake.ctx.oidn_device)
 
-        bake.denoise_tile_idx = (bake.denoise_tile_idx + 1) % (tile_count_x * tile_count_y)
+        bake.denoise_tile_idx = (bake.denoise_tile_idx + 1) % u32(tile_count.x * tile_count.y)
     }
     else
     {
@@ -944,32 +926,14 @@ oidn_error_callback :: proc "c"(user_ptr: rawptr, code: oidn.Error, message: cst
     fmt.printfln("OIDN Error (%v): %v", code, message)
 }
 
-oidn_copy_to_shared_buf :: proc(cmd_buf: gpu.Command_Buffer, dst: External_Buf, src: gpu.Texture, lightmap_size: u32, tile_idx: u32)
+oidn_copy_to_shared_buf :: proc(cmd_buf: gpu.Command_Buffer, dst: External_Buf, src: gpu.Texture, lightmap_size: [2]i32, tile_idx: u32)
 {
     vk_image := gpu.vk_get_image(src)
     vk_cmd_buf := gpu.vk_get_command_buffer(cmd_buf)
 
-    tile_count_x := (lightmap_size + DENOISE_TILE_SIZE - 1) / DENOISE_TILE_SIZE
-    tile_count_y := (lightmap_size + DENOISE_TILE_SIZE - 1) / DENOISE_TILE_SIZE
-
-    // Lots of stuff in OIDN to do to get tiled denoising to work...
-    ty := tile_idx / tile_count_x
-    tx := tile_idx % tile_count_x
-
-    inner_x0: int = int(tx * DENOISE_TILE_SIZE)
-    inner_y0: int = int(ty * DENOISE_TILE_SIZE)
-    inner_x1: int = clamp(inner_x0 + DENOISE_TILE_SIZE, 0, int(lightmap_size))
-    inner_y1: int = clamp(inner_y0 + DENOISE_TILE_SIZE, 0, int(lightmap_size))
-
-    t_x0 := clamp(inner_x0 - DENOISE_TILE_OVERLAP, 0, int(lightmap_size))
-    t_y0 := clamp(inner_y0 - DENOISE_TILE_OVERLAP, 0, int(lightmap_size))
-    t_x1 := clamp(inner_x1 + DENOISE_TILE_OVERLAP, 0, int(lightmap_size))
-    t_y1 := clamp(inner_y1 + DENOISE_TILE_OVERLAP, 0, int(lightmap_size))
-    tile_w := t_x1 - t_x0
-    tile_h := t_y1 - t_y0
-
-    bytes_per_pixel := u32(2 * 4)
-    byte_offset := (t_y0 * int(lightmap_size) + t_x0) * int(bytes_per_pixel)
+    bytes_per_pixel := i32(2 * 4)
+    tile := get_denoise_tile_info(tile_idx, lightmap_size, bytes_per_pixel)
+    tile_count := get_tile_count(lightmap_size)
 
     vk.CmdCopyImageToBuffer2(vk_cmd_buf, &vk.CopyImageToBufferInfo2 {
         sType = .COPY_IMAGE_TO_BUFFER_INFO_2,
@@ -980,21 +944,21 @@ oidn_copy_to_shared_buf :: proc(cmd_buf: gpu.Command_Buffer, dst: External_Buf, 
         regionCount = 1,
         pRegions = &vk.BufferImageCopy2 {
             sType = .BUFFER_IMAGE_COPY_2,
-            bufferOffset = vk.DeviceSize(byte_offset),
-            bufferRowLength = lightmap_size,
+            bufferOffset = vk.DeviceSize(tile.byte_offset),
+            bufferRowLength = u32(lightmap_size.x),
             bufferImageHeight = 0,
             imageSubresource = vk.ImageSubresourceLayers {
                 aspectMask = { .COLOR },
                 layerCount = 1,
             },
             imageOffset = {
-                i32(t_x0),
-                i32(t_y0),
+                i32(tile.x0),
+                i32(tile.y0),
                 0
             },
             imageExtent = vk.Extent3D {
-                width  = u32(tile_w),
-                height = u32(tile_h),
+                width  = u32(tile.width),
+                height = u32(tile.height),
                 depth  = 1,
             },
         },
@@ -1030,12 +994,12 @@ oidn_copy_from_shared_buf :: proc(cmd_buf: gpu.Command_Buffer, dst: gpu.Texture,
     })
 }
 
-oidn_create_lightmap_filter :: proc(oidn_device: oidn.Device, color: oidn.Buffer, output: oidn.Buffer, lightmap_size: u32, quality: oidn.Quality) -> oidn.Filter  // TODO: support different sizes in x and y
+oidn_create_lightmap_filter :: proc(oidn_device: oidn.Device, color: oidn.Buffer, output: oidn.Buffer, lightmap_size: [2]i32, quality: oidn.Quality) -> oidn.Filter  // TODO: support different sizes in x and y
 {
     filter := oidn.NewFilter(oidn_device, "RTLightmap")
     // TODO: Different formats?
-    oidn.SetFilterImage(filter, "color", color, .HALF3, auto_cast lightmap_size, auto_cast lightmap_size, pixelByteStride = 2 * 4)
-    oidn.SetFilterImage(filter, "output", output, .HALF3, auto_cast lightmap_size, auto_cast lightmap_size, pixelByteStride = 2 * 4)
+    oidn.SetFilterImage(filter, "color", color, .HALF3, auto_cast lightmap_size.x, auto_cast lightmap_size.y, pixelByteStride = 2 * 4)
+    oidn.SetFilterImage(filter, "output", output, .HALF3, auto_cast lightmap_size.x, auto_cast lightmap_size.y, pixelByteStride = 2 * 4)
     oidn.SetFilterInt(filter, "quality", i32(quality))
     oidn.SetFilterInt(filter, "tileAlignment", DENOISE_TILE_SIZE)
     oidn.SetFilterInt(filter, "tileOverlap", DENOISE_TILE_OVERLAP)
@@ -1123,6 +1087,59 @@ oidn_shared_semaphore_from_vk_semaphore :: proc(device: oidn.Device, sem: Extern
 
     oidn_check(device)
     return res
+}
+
+Denoise_Tile_Info :: struct
+{
+    tx, ty: u32,
+    inner_x0, inner_y0, inner_x1, inner_y1: int,
+    x0, y0, x1, y1: int,
+    width, height: int,
+    byte_offset: int,
+}
+
+get_denoise_tile_info :: proc(tile_idx: u32, lightmap_size: [2]i32, bytes_per_pixel: i32) -> Denoise_Tile_Info
+{
+    tile_count := get_tile_count(lightmap_size)
+    ty := tile_idx / u32(tile_count.x)
+    tx := tile_idx % u32(tile_count.x)
+
+    inner_x0: int = int(tx * DENOISE_TILE_SIZE)
+    inner_y0: int = int(ty * DENOISE_TILE_SIZE)
+    inner_x1: int = clamp(inner_x0 + DENOISE_TILE_SIZE, 0, int(lightmap_size.x))
+    inner_y1: int = clamp(inner_y0 + DENOISE_TILE_SIZE, 0, int(lightmap_size.y))
+
+    t_x0 := clamp(inner_x0 - DENOISE_TILE_OVERLAP, 0, int(lightmap_size.x))
+    t_y0 := clamp(inner_y0 - DENOISE_TILE_OVERLAP, 0, int(lightmap_size.y))
+    t_x1 := clamp(inner_x1 + DENOISE_TILE_OVERLAP, 0, int(lightmap_size.x))
+    t_y1 := clamp(inner_y1 + DENOISE_TILE_OVERLAP, 0, int(lightmap_size.y))
+    tile_w := t_x1 - t_x0
+    tile_h := t_y1 - t_y0
+
+    byte_offset := (t_y0 * int(lightmap_size.x) + t_x0) * int(bytes_per_pixel)
+
+    return {
+        tx = tx,
+        ty = ty,
+        inner_x0 = inner_x0,
+        inner_y0 = inner_y0,
+        inner_x1 = inner_x1,
+        inner_y1 = inner_y1,
+        x0 = t_x0,
+        y0 = t_y0,
+        x1 = t_x1,
+        y1 = t_y1,
+        width = tile_w,
+        height = tile_h,
+        byte_offset = byte_offset,
+    }
+}
+
+get_tile_count :: proc(lightmap_size: [2]i32) -> [2]i32
+{
+    tile_count_x := (lightmap_size.x + DENOISE_TILE_SIZE - 1) / DENOISE_TILE_SIZE
+    tile_count_y := (lightmap_size.y + DENOISE_TILE_SIZE - 1) / DENOISE_TILE_SIZE
+    return [2]i32 { tile_count_x, tile_count_y }
 }
 
 // Pool data type

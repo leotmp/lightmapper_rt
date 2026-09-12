@@ -14,6 +14,7 @@ Data :: struct
     model_to_world_normal: mat4,
     world_to_view: mat4,
     view_to_proj: mat4,
+    skip_lightmap: bool,
 }
 
 Chart :: struct
@@ -44,7 +45,10 @@ main :: (vert_id: uint @vert_id, data: ^Data @data) -> Output
 
     chart_idx := data.lm_chart_indices[vert_id];
     chart_base := data.lm_chart_base;
-    lm_uvs := get_lm_uv(data.lm_charts[chart_base + chart_idx], data.lm_uvs[vert_id]);
+    lm_uvs: vec2;
+    if !data.skip_lightmap {
+        lm_uvs = get_lm_uv(data.lm_charts[chart_base + chart_idx], data.lm_uvs[vert_id]);
+    }
 
     vert_out: Output;
     vert_out.pos = clip_pos;
@@ -57,7 +61,6 @@ main :: (vert_id: uint @vert_id, data: ^Data @data) -> Output
 
 get_lm_uv :: (chart: Chart, uv: vec2) -> vec2
 {
-    trans_uv := uv + chart.offset;
-    trans_uv /= 4096.0;
+    trans_uv := chart.x * uv.x + chart.y * uv.y + chart.offset;
     return trans_uv;
 }

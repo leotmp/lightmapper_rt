@@ -32,8 +32,6 @@ import lm "../../"
 Frames_In_Flight :: 3
 Example_Name_Format :: "Right-click + WASD for first-person controls. Left click to toggle texture type. Current: %v"
 
-Sponza_Scene :: #load("../shared/assets/sponza.glb")
-
 // How many textures to load in a single batch / command buffer
 Loader_Chunk_Size :: 16
 
@@ -42,7 +40,7 @@ COLOR_TARGET_IDX: u32 = 0
 POSTPROCESS_TARGET_IDX: u32 = 0
 POSTPROCESS_TARGET_RW_IDX: u32 = 0
 
-LM_SIZE :: 4096
+LM_TARGET_SIZE :: 4096
 
 // Textures can be loaded/unloaded on different threads, so we need to synchronize access to loaded_textures, image_to_texture and image_uploaded
 mutex: sync.Mutex
@@ -62,6 +60,16 @@ upload_sem_val: u64
 
 main :: proc()
 {
+    cmd_args := os.args
+    glb_path := "assets/Sponza.glb"
+    skip_lightmap := false
+    if len(cmd_args) > 1 {
+        glb_path = cmd_args[1]
+    }
+    if len(cmd_args) > 2 && cmd_args[2] == "skip_lightmap" {
+        skip_lightmap = true
+    }
+
     ok_i := sdl.Init({.VIDEO})
     assert(ok_i)
 
@@ -139,7 +147,15 @@ main :: proc()
     defer gpu.texture_free_and_destroy(&magenta_texture)
     magenta_texture_id := gpu.desc_pool_alloc_texture(&desc_pool, gpu.texture_view_descriptor(magenta_texture, {}))
 
-    gltf_scene, texture_infos, gltf_data := shared.load_scene_gltf(Sponza_Scene, magenta_texture_id)
+    white_texture := create_white_texture(&upload_arena, upload_cmd_buf)
+    defer gpu.texture_free_and_destroy(&white_texture)
+    white_texture_id := gpu.desc_pool_alloc_texture(&desc_pool, gpu.texture_view_descriptor(white_texture, {}))
+
+    glb_contents, err_r := os.read_entire_file_from_path(glb_path, allocator = context.allocator)
+    ensure(err_r == nil)
+    defer delete(glb_contents)
+
+    gltf_scene, texture_infos, gltf_data, lm_size := shared.load_scene_gltf(glb_contents, magenta_texture_id, white_texture_id, skip_lightmap, LM_TARGET_SIZE)
     defer {
         shared.destroy_scene(&gltf_scene)
         gltf2.unload(gltf_data)
@@ -222,7 +238,7 @@ main :: proc()
     lm.init(&lm_ctx, &desc_pool)
     defer lm.cleanup(&lm_ctx)
 
-    scene := upload_scene(gltf_scene, &lm_ctx, &upload_arena, &bvh_scratch_arena, upload_cmd_buf)
+    scene := upload_scene(gltf_scene, &lm_ctx, &upload_arena, &bvh_scratch_arena, upload_cmd_buf, skip_lightmap)
     defer scene_destroy(&scene)
 
     anisotropy := min(16.0, gpu.device_limits().max_anisotropy)
@@ -244,7 +260,7 @@ main :: proc()
 
     lightmap := gpu.texture_alloc_and_create({
         format = .RGBA16_Float,
-        dimensions = { LM_SIZE, LM_SIZE, 1 },
+        dimensions = { u32(lm_size.x), u32(lm_size.y), 1 },
         usage = { .Sampled, .Storage, .Transfer_Src, .Color_Attachment }
     })
     defer gpu.texture_free_and_destroy(&lightmap)
@@ -252,6 +268,7 @@ main :: proc()
     ui := make_ui_default()
 
     bake: lm.Bake
+    if !skip_lightmap
     {
         lm_instances := make([]lm.Instance, len(gltf_scene.instances), allocator = context.temp_allocator)
         for &lm_instance, i in lm_instances
@@ -282,12 +299,19 @@ main :: proc()
                 offset = chart.offset,
             }
         }
-        bake = lm.bake_begin(&lm_ctx, LM_SIZE, 3000, lightmap, lm_instances, lm_charts, ui.lights)
+        bake = lm.bake_begin(&lm_ctx, lm_size, 3000, lightmap, lm_instances, lm_charts, ui.lights)
     }
-    defer lm.bake_destroy(&bake)
+    defer if !skip_lightmap do lm.bake_destroy(&bake)
 
-    gbuf_world_pos_id := gpu.desc_pool_alloc_texture(&desc_pool, gpu.texture_view_descriptor(lm.bake_debug_get_gbuffer_world_pos(&bake), {}))
-    gbuf_world_normals_id := gpu.desc_pool_alloc_texture(&desc_pool, gpu.texture_view_descriptor(lm.bake_debug_get_gbuffer_world_normals(&bake), {}))
+    gbuf_world_pos_tex := lm.bake_debug_get_gbuffer_world_pos(&bake)
+    gbuf_world_normals_tex := lm.bake_debug_get_gbuffer_world_normals(&bake)
+    if gbuf_world_pos_tex == {} {
+        gbuf_world_pos_tex = magenta_texture
+        gbuf_world_normals_tex = magenta_texture
+    }
+
+    gbuf_world_pos_id := gpu.desc_pool_alloc_texture(&desc_pool, gpu.texture_view_descriptor(gbuf_world_pos_tex, {}))
+    gbuf_world_normals_id := gpu.desc_pool_alloc_texture(&desc_pool, gpu.texture_view_descriptor(gbuf_world_normals_tex, {}))
     lightmap_id := gpu.desc_pool_alloc_texture(&desc_pool, gpu.texture_view_descriptor(lightmap, {}))
 
     imgui_ctx := init_dear_imgui(window, &desc_pool)
@@ -385,44 +409,49 @@ main :: proc()
                 scale = {},
             })
         }
-        ui_update(&ui, draw_calls[:], { gbuf_world_pos_id, gbuf_world_normals_id, lightmap_id }, { "World Position", "World Normals", "Lightmap" }, lm.bake_progress(&bake))
+        ui_update(&ui, draw_calls[:], { gbuf_world_pos_id, gbuf_world_normals_id, lightmap_id }, { "World Position", "World Normals", "Lightmap" }, lm.bake_progress(&bake), skip_lightmap, lm_size)
         // ui_update_animation(&ui, delta_time)
+
+        if skip_lightmap do ui.sample_lightmap = false
 
         imgui.render()
 
         gpu.cmd_set_desc_heap(cmd_buf, desc_pool)
 
-        lm_instances := make([]lm.Instance, len(gltf_scene.instances), allocator = context.temp_allocator)
-        for &lm_instance, i in lm_instances
+        if !skip_lightmap
         {
-            instance := gltf_scene.instances[i]
-            mesh := scene.meshes[gltf_scene.instances[i].mesh_idx]
-            gltf_mesh := gltf_scene.meshes[gltf_scene.instances[i].mesh_idx]
-            lm_instance = lm.Instance {
-                mesh_handle = mesh.lm_mesh_handle,
-                lm_uvs_handle = mesh.lm_uv_handle,
-                transform = instance.transform,
-                lm_uvs_offset = 0,
-                lm_uvs_scale = { 1.0, 1.0 },
-                albedo_tex_id = gltf_mesh.base_color_map,
-                albedo = { 1.0, 1.0, 1.0 },
-            }
-            lm_charts := make([]lm.Chart, len(gltf_scene.lm_charts), allocator = context.temp_allocator)
-            for &lm_chart, i in lm_charts
+            lm_instances := make([]lm.Instance, len(gltf_scene.instances), allocator = context.temp_allocator)
+            for &lm_instance, i in lm_instances
             {
-                chart := gltf_scene.lm_charts[i]
-                lm_chart = lm.Chart {
-                    x = chart.x,
-                    y = chart.y,
-                    offset = chart.offset,
+                instance := gltf_scene.instances[i]
+                mesh := scene.meshes[gltf_scene.instances[i].mesh_idx]
+                gltf_mesh := gltf_scene.meshes[gltf_scene.instances[i].mesh_idx]
+                lm_instance = lm.Instance {
+                    mesh_handle = mesh.lm_mesh_handle,
+                    lm_uvs_handle = mesh.lm_uv_handle,
+                    transform = instance.transform,
+                    lm_uvs_offset = 0,
+                    lm_uvs_scale = { 1.0, 1.0 },
+                    albedo_tex_id = gltf_mesh.base_color_map,
+                    albedo = { 1.0, 1.0, 1.0 },
+                }
+                lm_charts := make([]lm.Chart, len(gltf_scene.lm_charts), allocator = context.temp_allocator)
+                for &lm_chart, i in lm_charts
+                {
+                    chart := gltf_scene.lm_charts[i]
+                    lm_chart = lm.Chart {
+                        x = chart.x,
+                        y = chart.y,
+                        offset = chart.offset,
+                    }
                 }
             }
+            if ui.do_reset_bake || lm.bake_scene_changed(&bake, lm_instances, ui.lights) {
+                lm.bake_reset(&bake)
+                pathtrace_gt_counter = 0
+            }
+            lm.bake_iteration(&bake, frame_arena, lm_instances, ui.lights, ui.fix_seams, ui.denoise)
         }
-        if ui.do_reset_bake || lm.bake_scene_changed(&bake, lm_instances, ui.lights) {
-            lm.bake_reset(&bake)
-            pathtrace_gt_counter = 0
-        }
-        lm.bake_iteration(&bake, frame_arena, lm_instances, ui.lights, ui.fix_seams, ui.denoise)
 
         switch ui.output_type
         {
@@ -443,7 +472,7 @@ main :: proc()
                 })
                 gpu.cmd_set_shaders(cmd_buf, vert_shader_lit, frag_shader_lit)
 
-                gpu.cmd_set_raster_state(cmd_buf, { alpha_to_coverage = true })
+                gpu.cmd_set_raster_state(cmd_buf, { cull_mode = .None, alpha_to_coverage = true })
 
                 // Set texture and sampler heaps
                 gpu.cmd_set_desc_heap(cmd_buf, desc_pool)
@@ -455,8 +484,6 @@ main :: proc()
                     mesh_idx := instance.mesh_idx
                     mesh := scene.meshes[mesh_idx]
                     base_color_map := gltf_scene.meshes[instance.mesh_idx].base_color_map
-                    metallic_roughness_map := gltf_scene.meshes[instance.mesh_idx].metallic_roughness_map
-                    normal_map := gltf_scene.meshes[instance.mesh_idx].normal_map
 
                     Vert_Data :: struct #all_or_none {
                         positions:             rawptr,
@@ -472,6 +499,8 @@ main :: proc()
                         model_to_world_normal: [16]f32,
                         world_to_view:         [16]f32,
                         view_to_proj:          [16]f32,
+
+                        skip_lightmap:         b32,
                     }
                     verts_data := gpu.arena_alloc(frame_arena, Vert_Data)
                     verts_data.cpu^ = {
@@ -488,6 +517,8 @@ main :: proc()
                         model_to_world_normal = intr.matrix_flatten(linalg.transpose(linalg.inverse(instance.transform))),
                         world_to_view         = intr.matrix_flatten(world_to_view),
                         view_to_proj          = intr.matrix_flatten(view_to_proj),
+
+                        skip_lightmap         = b32(skip_lightmap),
                     }
 
                     lm_sampler: u32
@@ -501,10 +532,7 @@ main :: proc()
                     Frag_Data :: struct #all_or_none {
                         base_color_map:                 u32,
                         base_color_map_sampler:         u32,
-                        metallic_roughness_map:         u32,
-                        metallic_roughness_map_sampler: u32,
-                        normal_map:                     u32,
-                        normal_map_sampler:             u32,
+                        base_color: [4]f32,
 
                         lightmap: u32,
                         lightmap_sampler: u32,
@@ -516,10 +544,7 @@ main :: proc()
                     frag_data.cpu^ = {
                         base_color_map                 = base_color_map,
                         base_color_map_sampler         = sampler_linear_id,
-                        metallic_roughness_map         = metallic_roughness_map,
-                        metallic_roughness_map_sampler = 0,
-                        normal_map                     = normal_map,
-                        normal_map_sampler             = 0,
+                        base_color = instance.base_color,
 
                         lightmap = lightmap_id,
                         lightmap_sampler = lm_sampler,
@@ -717,7 +742,7 @@ Lights_Shader :: struct
     dir_light_emission: [3]f32,
 }
 
-upload_scene :: proc(scene: shared.Scene, lm_ctx: ^lm.Context, upload_arena: ^gpu.Arena, bvh_scratch_arena: ^gpu.Arena, cmd_buf: gpu.Command_Buffer) -> Scene_GPU
+upload_scene :: proc(scene: shared.Scene, lm_ctx: ^lm.Context, upload_arena: ^gpu.Arena, bvh_scratch_arena: ^gpu.Arena, cmd_buf: gpu.Command_Buffer, skip_lightmap: bool) -> Scene_GPU
 {
     res: Scene_GPU
 
@@ -738,27 +763,31 @@ upload_scene :: proc(scene: shared.Scene, lm_ctx: ^lm.Context, upload_arena: ^gp
     }
 
     gpu.cmd_barrier(cmd_buf, .Transfer, .All)
-    for &mesh, i in res.meshes
+
+    if !skip_lightmap
     {
-        mesh_cpu := scene.meshes[i]
-        mesh_lm_uvs := mesh_cpu.lm_uvs
+        for &mesh, i in res.meshes
+        {
+            mesh_cpu := scene.meshes[i]
+            mesh_lm_uvs := mesh_cpu.lm_uvs
 
-        mesh.lm_mesh_handle = lm.add_mesh(lm_ctx, cmd_buf, lm.Mesh_Desc {
-            positions_gpu = mesh.pos,
-            normals_gpu = mesh.normals,
-            uvs_gpu = mesh.uvs,
-            indices_gpu = mesh.indices,
-            lm_chart_indices = mesh.lm_chart_indices,
-        })
+            mesh.lm_mesh_handle = lm.add_mesh(lm_ctx, cmd_buf, lm.Mesh_Desc {
+                positions_gpu = mesh.pos,
+                normals_gpu = mesh.normals,
+                uvs_gpu = mesh.uvs,
+                indices_gpu = mesh.indices,
+                lm_chart_indices = mesh.lm_chart_indices,
+            })
 
-        mesh.lm_uv_handle = lm.add_lightmap_uvs(lm_ctx, cmd_buf, lm.Lightmap_UVs_Desc {
-            positions_cpu = mesh_cpu.pos[:],
-            normals_cpu = mesh_cpu.normals[:],
-            lm_uvs_cpu = mesh_cpu.lm_uvs[:],
-            indices_cpu = mesh_cpu.indices[:],
+            mesh.lm_uv_handle = lm.add_lightmap_uvs(lm_ctx, cmd_buf, lm.Lightmap_UVs_Desc {
+                positions_cpu = mesh_cpu.pos[:],
+                normals_cpu = mesh_cpu.normals[:],
+                lm_uvs_cpu = mesh_cpu.lm_uvs[:],
+                indices_cpu = mesh_cpu.indices[:],
 
-            lm_uvs_gpu = mesh.lm_uvs,
-        })
+                lm_uvs_gpu = mesh.lm_uvs,
+            })
+        }
     }
 
     return res
@@ -934,10 +963,8 @@ load_scene_textures_from_gltf :: proc(
         switch info.texture_type {
         case .Base_Color:
             scene.meshes[info.mesh_id].base_color_map = texture.texture_idx
-        case .Metallic_Roughness:
-            scene.meshes[info.mesh_id].metallic_roughness_map = texture.texture_idx
-        case .Normal:
-            scene.meshes[info.mesh_id].normal_map = texture.texture_idx
+        case .Metallic_Roughness: {}
+        case .Normal: {}
         }
     }
 }
@@ -1547,7 +1574,7 @@ make_ui_default :: proc() -> UI_State
     return res
 }
 
-ui_update :: proc(ui: ^UI_State, debug_viz_draw_calls: []UV_Mesh_Draw_Call, texture_ids: []u32, texture_names: []cstring, bake_progress: f32)
+ui_update :: proc(ui: ^UI_State, debug_viz_draw_calls: []UV_Mesh_Draw_Call, texture_ids: []u32, texture_names: []cstring, bake_progress: f32, skip_lightmap: bool, lm_size: [2]i32)
 {
     if imgui.begin_main_menu_bar()
     {
@@ -1601,6 +1628,8 @@ ui_update :: proc(ui: ^UI_State, debug_viz_draw_calls: []UV_Mesh_Draw_Call, text
                 imgui.same_line()
                 imgui.checkbox("Sample diffuse", &ui.sample_diffuse)
                 imgui.pop_item_width()
+
+                if skip_lightmap do ui.sample_lightmap = false
             }
 
             // Output type
@@ -1725,9 +1754,9 @@ ui_update :: proc(ui: ^UI_State, debug_viz_draw_calls: []UV_Mesh_Draw_Call, text
         imgui.end()
     }
 
-    if ui.show_texture_viewer
+    if ui.show_texture_viewer && !skip_lightmap
     {
-        gui_show_debug_texture_window("Lightmap Viewer", texture_ids, texture_names, LM_SIZE, LM_SIZE, debug_viz_draw_calls, &ui.show_texture_viewer)
+        gui_show_debug_texture_window("Lightmap Viewer", texture_ids, texture_names, int(lm_size.x), int(lm_size.y), debug_viz_draw_calls, &ui.show_texture_viewer)
     }
 }
 
@@ -1760,10 +1789,29 @@ dir_from_spherical_coords :: proc(azimuth: f32, elevation: f32) -> [3]f32
     }
 }
 
-// Create a 1x1 magenta texture (useful as default/missing texture indicator)
+// Create a 1x1 magenta texture
 create_magenta_texture :: proc(upload_arena: ^gpu.Arena, cmd_buf: gpu.Command_Buffer) -> gpu.Owned_Texture
 {
     magenta_pixels := [4]u8{255, 0, 255, 255}
+    staging := gpu.arena_alloc(upload_arena, u8, 4)
+    copy(staging.cpu, magenta_pixels[:])
+
+    texture := gpu.texture_alloc_and_create(
+        {
+            type = .D2,
+            dimensions = {1, 1, 1},
+            format = .RGBA8_Unorm,
+            usage = {.Sampled},
+        },
+    )
+    gpu.cmd_copy_to_texture(cmd_buf, texture, staging)
+    return texture
+}
+
+// Create a 1x1 white texture
+create_white_texture :: proc(upload_arena: ^gpu.Arena, cmd_buf: gpu.Command_Buffer) -> gpu.Owned_Texture
+{
+    magenta_pixels := [4]u8{255, 255, 255, 255}
     staging := gpu.arena_alloc(upload_arena, u8, 4)
     copy(staging.cpu, magenta_pixels[:])
 

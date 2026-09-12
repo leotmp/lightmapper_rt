@@ -3,6 +3,8 @@ package xatlas
 
 import "core:c"
 
+CUSTOM_FORK :: true
+
 // Odin bindings for XAtlas. Has most C++ Quality Of Life things.
 // Unless otherwise specified, default values are 0/nil/false.
 
@@ -45,23 +47,65 @@ Mesh :: struct
     vertexCount: u32,
 }
 
+when CUSTOM_FORK
+{
+    MeshInstance :: struct
+    {
+        meshIndex: u32,
+        chartTransformBase: u32,
+    }
+}
+
 ImageChartIndexMask:   u32 : 0x1FFFFFFF
 ImageHasChardIndexBit: u32 : 0x80000000
 ImageIsBilinearBit:    u32 : 0x40000000
 ImageIsPaddingBit:     u32 : 0x20000000
 
-// Empty on creation. Populated after charts are packed.
-Atlas :: struct
+when CUSTOM_FORK
 {
-    image: [^]u32,
-    meshes: [^]Mesh,  // The output meshes, corresponding to each AddMesh call.
-    utilization: ^f32,  // Normalized atlas texel utilization array. E.g. a value of 0.8 means 20% empty space. atlasCount in length.
-    width: u32,  // Atlas width in texels.
-    height: u32,  // Atlas height in texels.
-    atlasCount: u32,  // Number of sub-atlases. Equal to 0 unless PackOptions resolution is changed from default (0).
-    chartCount: u32,  // Total number of charts in all meshes.
-    meshCount: u32,  // Number of output meshes. Equal to the number of times AddMesh was called.
-    texelsPerUnit: f32,  // Equal to PackOptions texelsPerUnit if texelsPerUnit > 0, otherwise an estimated value to match PackOptions resolution.
+    ChartTransform :: struct
+    {
+        mat: [4]f32,  // 2x2
+        offset: [2]f32,
+        atlasIndex: u32,
+    }
+}
+
+// Empty on creation. Populated after charts are packed.
+when CUSTOM_FORK
+{
+    Atlas :: struct
+    {
+        image: [^]u32,
+        meshes: [^]Mesh,  // The output meshes, corresponding to each AddMesh call.
+        utilization: ^f32,  // Normalized atlas texel utilization array. E.g. a value of 0.8 means 20% empty space. atlasCount in length.
+        width: u32,  // Atlas width in texels.
+        height: u32,  // Atlas height in texels.
+        atlasCount: u32,  // Number of sub-atlases. Equal to 0 unless PackOptions resolution is changed from default (0).
+        chartCount: u32,  // Total number of charts in all meshes.
+        meshCount: u32,  // Number of output meshes. Equal to the number of times AddMesh was called.
+        texelsPerUnit: f32,  // Equal to PackOptions texelsPerUnit if texelsPerUnit > 0, otherwise an estimated value to match PackOptions resolution.
+
+        meshInstances: [^]MeshInstance,
+        meshInstanceCount: u32,
+        chartTransforms: [^]ChartTransform,
+        chartTransformCount: u32,
+    }
+}
+else
+{
+    Atlas :: struct
+    {
+        image: [^]u32,
+        meshes: [^]Mesh,  // The output meshes, corresponding to each AddMesh call.
+        utilization: ^f32,  // Normalized atlas texel utilization array. E.g. a value of 0.8 means 20% empty space. atlasCount in length.
+        width: u32,  // Atlas width in texels.
+        height: u32,  // Atlas height in texels.
+        atlasCount: u32,  // Number of sub-atlases. Equal to 0 unless PackOptions resolution is changed from default (0).
+        chartCount: u32,  // Total number of charts in all meshes.
+        meshCount: u32,  // Number of output meshes. Equal to the number of times AddMesh was called.
+        texelsPerUnit: f32,  // Equal to PackOptions texelsPerUnit if texelsPerUnit > 0, otherwise an estimated value to match PackOptions resolution.
+    }
 }
 
 IndexFormat :: enum c.int
@@ -229,6 +273,11 @@ foreign xatlas_clib
     // Add a mesh to the atlas. MeshDecl data is copied, so it can be freed after AddMesh returns.
     @(require_results)
     AddMesh :: proc(atlas: ^Atlas, #by_ptr meshDecl: MeshDecl, meshCountHint: u32) -> AddMeshError ---
+
+    when CUSTOM_FORK
+    {
+        AddMeshInstance :: proc(atlas: ^Atlas, meshIndex: u32) -> u32 ---
+    }
 
     // Wait for AddMesh async processing to finish. ComputeCharts / Generate call this internally.
     AddMeshJoin :: proc(atlas: ^Atlas) ---

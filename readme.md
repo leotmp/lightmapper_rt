@@ -25,9 +25,11 @@ lightmap := gpu.texture_alloc_and_create({
 })
 defer gpu.texture_free_and_destroy(&lightmap)
 
-// TODO: This should be avoided!
 lm_instances := /* Convert your scene into []lm.Instance */
-bake := lm.bake_begin(&lm_ctx, LM_SIZE, 3000, lightmap, lm_instances, ui.lights)
+
+// You can have multiple bake instances for different parts of your scene.
+// Each bake instance will have a separate lightmap texture associated to it.
+bake := lm.bake_begin(&lm_ctx, LM_SIZE, 3000, lightmap)
 defer lm.bake_destroy(&bake)
 
 // --- Main loop
@@ -35,11 +37,15 @@ for true
 {
     // Per-frame operations...
 
-    lm_instances := /* Convert your scene into []lm.Instance */
-    if lm.bake_scene_changed(&bake, lm_instances, lm_lights) {
+    scene_has_changed := /* Detect if your instances have changed */
+    if !bake.has_scene || scene_has_changed
+    {
+        lm_instances := /* Convert your scene into []lm.Instance */
+        lm_lights := /* Convert your lights into lm.Lights */
+        lm.submit_scene(&bake, lm_instances, lm_lights)
         lm.bake_reset(&bake)
     }
-    lm.bake_iteration(&bake, frame_arena, lm_instances, ui.lights, ui.fix_seams, ui.denoise)
+    lm.bake_iteration(&bake, frame_arena, do_denoise)
 }
 
 gpu.wait_idle()

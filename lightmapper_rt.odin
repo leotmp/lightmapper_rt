@@ -156,7 +156,7 @@ Bake :: struct
     instances: [dynamic]Instance,
     lights: Lights,
     scene_gpu: Scene_GPU,
-    lightmap_size: u32,
+    lightmap_size: [2]i32,
     lightmap: gpu.Texture,  // Not owned
     lightmap_rw_id: u32,
     lightmap_id: u32,
@@ -216,7 +216,7 @@ Lights :: struct
     sun_emission: [3]f32,  // NOTE: This is total emission across the sun's surface
 }
 
-bake_begin :: proc(ctx: ^Context, #any_int lightmap_size: i64, samples: u32, lightmap: gpu.Texture, instances: []Instance, charts: []Chart, lights: Lights) -> Bake
+bake_begin :: proc(ctx: ^Context, lightmap_size: [2]i32, samples: u32, lightmap: gpu.Texture, instances: []Instance, charts: []Chart, lights: Lights) -> Bake
 {
     return bake_begin_impl(ctx, lightmap_size, samples, lightmap, instances, charts, lights)
 }

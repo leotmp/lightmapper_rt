@@ -3,12 +3,7 @@ Data :: struct
 {
     base_color_map: texture_id,
     base_color_map_sampler: sampler_id,
-
-    metallic_roughness_map: texture_id,
-    metallic_roughness_map_sampler: sampler_id,
-
-    normal_map: texture_id,
-    normal_map_sampler: sampler_id,
+    base_color: vec4,
 
     lightmap: texture_id,
     lightmap_sampler: sampler_id,
@@ -22,33 +17,26 @@ PI: float = 3.14159265359;
 main :: (normal_vert: vec4 @io(0), uv: vec2 @io(1, centroid), lm_uv: vec2 @io(2, centroid), world_pos: vec4 @io(3), data: ^Data @data) -> vec4 @io(0)
 {
     // Sample base color texture
-    base_color := texture_sample(data.base_color_map, data.base_color_map_sampler, uv);
+    base_color := texture_sample(data.base_color_map, data.base_color_map_sampler, uv) * data.base_color;
     // Trick to get crisp AA on foliage.
-    base_color.a = (base_color.a - 0.3) / max(fwidth_(base_color.a), 0.0001) + 0.5;
+    // base_color.a = (base_color.a - 0.3) / max(fwidth_(base_color.a), 0.0001) + 0.5;
 
-    // Sample normal map and transform to world space
-    // TODO: Properly transform normal map from tangent space to world space
-    normal_map_sample := texture_sample(data.normal_map, data.normal_map_sampler, uv);
-    // For now, use vertex normal (normal_map_sample would need tangent/bitangent)
-    world_normal := normalize(normal_vert.xyz);
-    // Pack normal into RGB (0.5 + 0.5 * normal to map from [-1,1] to [0,1])
-    packed_normal := vec4(world_normal * 0.5 + 0.5, 1.0);
-
-    // Sample metallic/roughness texture
-    metallic_roughness_sample := texture_sample(data.metallic_roughness_map, data.metallic_roughness_map_sampler, uv);
+    if data.sample_diffuse && !data.sample_lightmap {
+        return base_color;
+    }
 
     irradiance: vec3;
     if data.do_bicubic_sampling {
         lm_sample := texture_sample_bicubic(data.lightmap, data.lightmap_sampler, lm_uv);
         irradiance = lm_sample.rgb;
         if lm_sample.a < 0.5 {
-            return vec4(0, 0, 1, 1);
+            return vec4(1, 0, 1, base_color.a);
         }
     } else {
         lm_sample := texture_sample(data.lightmap, data.lightmap_sampler, lm_uv);
         irradiance = lm_sample.rgb;
         if lm_sample.a < 0.5 {
-            return vec4(0, 0, 1, 1);
+            return vec4(1, 0, 1, base_color.a);
         }
     }
 

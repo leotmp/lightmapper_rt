@@ -13,6 +13,7 @@ import "core:image"
 import "core:image/jpeg"
 import "core:image/png"
 import intr "base:intrinsics"
+import "core:c"
 
 import sdl "vendor:sdl3"
 
@@ -38,8 +39,7 @@ Mesh :: struct {
     lm_chart_indices:       [dynamic]i32,
     indices:                [dynamic]u32,
     base_color_map:         u32,
-    metallic_roughness_map: u32,
-    normal_map:             u32,
+    base_color:             [4]f32,
 }
 
 destroy_mesh :: proc(mesh: ^Mesh) {
@@ -354,6 +354,7 @@ Instance :: struct {
     transform: matrix[4, 4]f32,
     mesh_idx:  u32,
     lm_chart_base: u32,
+    base_color: [4]f32,
 }
 
 // Input
@@ -560,10 +561,14 @@ buffer_slice_with_stride :: proc(
 load_scene_gltf :: proc(
     contents: []byte,
     missing_texture_id: u32,
+    white_texture_id: u32,
+    skip_lightmap: bool,
+    target_lm_size: u32,
 ) -> (
     Scene,
     []Gltf_Texture_Info,
     ^gltf2.Data,
+    [2]i32
 ) {
     options := gltf2.Options{}
     options.is_glb = true
@@ -656,9 +661,8 @@ load_scene_gltf :: proc(
             }
 
             mesh_idx := u32(len(meshes))
-            base_color_map: u32 = missing_texture_id
-            metallic_roughness_map: u32 = missing_texture_id
-            normal_map: u32 = missing_texture_id
+            base_color_map: u32 = white_texture_id
+            base_color: [4]f32 = { 1, 1, 1, 1 }
 
             if primitive.material != nil {
                 material_idx := primitive.material.?
@@ -693,7 +697,11 @@ load_scene_gltf :: proc(
                             )
                         }
                     }
+
+                    // Base color multiplier
+                    base_color = material.metallic_roughness.?.base_color_factor
                 }
+
 
                 // Normal texture
                 if normal_tex := material.normal_texture; normal_tex != nil {
@@ -728,8 +736,7 @@ load_scene_gltf :: proc(
                 uvs = slice.clone_to_dynamic(uvs_final),
                 indices = slice.clone_to_dynamic(indices_u32[:]),
                 base_color_map = base_color_map,
-                metallic_roughness_map = metallic_roughness_map,
-                normal_map = normal_map,
+                base_color = base_color,
             }
             append(&meshes, loaded)
         }
@@ -765,6 +772,7 @@ load_scene_gltf :: proc(
                     instance := Instance {
                         transform = flip_z * transform,
                         mesh_idx  = primitive_idx,
+                        base_color = meshes[mesh_idx].base_color,
                     }
                     append(instances, instance)
                 }
@@ -776,11 +784,15 @@ load_scene_gltf :: proc(
         }
     }
 
-    // Generate lightmap info
     scene := Scene { instances = instances, meshes = meshes }
-    generate_lightmap_uvs(&scene)
 
-    return scene, texture_infos[:], data
+    // Generate lightmap info
+    lm_size: [2]i32
+    if !skip_lightmap {
+        lm_size = generate_lightmap_uvs(&scene, target_lm_size)
+    }
+
+    return scene, texture_infos[:], data, lm_size
 }
 
 load_texture_from_gltf :: proc(
@@ -942,18 +954,25 @@ Lightmap_Chart :: struct
     offset: [2]f32,
 }
 
-generate_lightmap_uvs :: proc(scene: ^Scene)
+generate_lightmap_uvs :: proc(scene: ^Scene, target_lm_size: u32) -> [2]i32
 {
     fmt.println("Building lightmap UVs...")
     defer fmt.println("Done building lightmap UVs.")
 
-    fmt.println("Computing charts for each mesh... (This can be done offline during mesh export)")
+    atlas := xa.Create()
+    defer xa.Destroy(atlas)
+
+    xa.SetProgressCallback(atlas, proc "c"(category: xa.ProgressCategory, progress: c.int, userData: rawptr) -> c.bool {
+        if category == .ADDMESH do return true
+
+        context = runtime.default_context()
+        fmt.printf("XAtlas (%v): %v%%\r", category, progress)
+        if progress == 100 do fmt.println("")
+        return true
+    })
 
     for &mesh, mesh_idx in scene.meshes
     {
-        atlas := xa.Create()
-        defer xa.Destroy(atlas)
-
         mesh_decl := xa.make_mesh_decl()
         mesh_decl.vertexPositionData = raw_data(mesh.pos)
         mesh_decl.vertexNormalData = raw_data(mesh.normals)
@@ -969,22 +988,45 @@ generate_lightmap_uvs :: proc(scene: ^Scene)
         res := xa.AddMesh(atlas, mesh_decl, 0)
         if res != .SUCCESS {
             fmt.printfln("XAtlas Error: %v", xa.StringForEnum(res))
-            return
+            return [2]i32 { i32(target_lm_size), i32(target_lm_size) }
         }
+    }
 
-        xa.ComputeCharts(atlas, xa.make_chart_options())
-        pack_options := xa.make_pack_options()
-        pack_options.blockAlign = true
-        pack_options.texelsPerUnit = 0.3
-        pack_options.padding = 1
-        pack_options.bilinear = true
-        xa.PackCharts(atlas, pack_options)
+    // Register instances
+    for instance in scene.instances
+    {
+        xa.AddMeshInstance(atlas, instance.mesh_idx)
+    }
 
-        ensure(atlas.meshCount == 1)
-        xa_mesh := atlas.meshes[0]
+    fmt.println("Computing mesh charts (this should be done during the mesh import step)...")
+    xa.ComputeCharts(atlas, xa.make_chart_options())
+    fmt.println("Done computing charts.")
 
-        // NOTE: The charting process will modify the mesh (duplicate verts for splits)
-        // So we need to overwrite the old meshes
+    pack_options := xa.make_pack_options()
+    pack_options.blockAlign = true
+    pack_options.texelsPerUnit = 0  // Will attempt to get close to the provided resolution
+    pack_options.resolution = 4096
+    pack_options.padding = 1
+    pack_options.bilinear = true
+    pack_options.rotateCharts = false
+    pack_options.rotateChartsToAxis = false
+
+    fmt.println("Packing charts...")
+    xa.PackCharts(atlas, pack_options)
+
+    fmt.println("Done packing charts. Results:")
+    fmt.println("TPU:", atlas.texelsPerUnit)
+    fmt.println("Atlas:", atlas.width, atlas.height)
+    fmt.println("Utilization:", atlas.utilization^)
+    fmt.println("Charts:", atlas.chartCount)
+    ensure(atlas.atlasCount == 1)
+
+    // NOTE: The charting process will modify the mesh (duplicate verts for splits)
+    // So we need to overwrite the old meshes
+    for &mesh, mesh_idx in scene.meshes
+    {
+        xa_mesh := atlas.meshes[mesh_idx]
+
         new_mesh := Mesh {
             pos = make(type_of(mesh.pos), xa_mesh.vertexCount),
             normals = make(type_of(mesh.normals), xa_mesh.vertexCount),
@@ -993,8 +1035,6 @@ generate_lightmap_uvs :: proc(scene: ^Scene)
             lm_chart_indices = make(type_of(mesh.lm_chart_indices), xa_mesh.vertexCount),
             indices = make(type_of(mesh.indices), xa_mesh.indexCount),
             base_color_map = mesh.base_color_map,
-            metallic_roughness_map = mesh.metallic_roughness_map,
-            normal_map = mesh.normal_map,
         }
         defer {
             destroy_mesh(&mesh)
@@ -1018,103 +1058,39 @@ generate_lightmap_uvs :: proc(scene: ^Scene)
         copy(new_mesh.indices[:], xa_mesh.indexArray[:xa_mesh.indexCount])
     }
 
-    fmt.println("Done computing charts.")
-
-    fmt.println("Packing charts... (This can be done progressively on a background thread on each entity addition/removal)")
-
-    pack_atlas := xa.Create()
-    defer xa.Destroy(pack_atlas)
-
-    for instance in scene.instances
-    {
-        mesh := scene.meshes[instance.mesh_idx]
-        lm_uv := mesh.lm_uvs
-
-        uv_decl := xa.UvMeshDecl {
-            vertexUvData = raw_data(lm_uv),
-            vertexCount = u32(len(lm_uv)),
-            vertexStride = size_of([2]f32),
-
-            indexData = raw_data(mesh.indices),
-            indexCount = u32(len(mesh.indices)),
-            indexFormat = .UInt32,
-        }
-
-        err := xa.AddUvMesh(pack_atlas, uv_decl)
-        if err != .SUCCESS {
-            fmt.printfln("XAtlas Error: %v", xa.StringForEnum(err))
-            return
-        }
-    }
-
-    xa.ComputeCharts(pack_atlas, xa.make_chart_options())
-
-    pack_options := xa.make_pack_options()
-    pack_options.blockAlign = true
-    pack_options.texelsPerUnit = 1
-    pack_options.resolution = 4096
-    pack_options.padding = 1
-    pack_options.bilinear = true
-    pack_options.rotateCharts = false
-    pack_options.rotateChartsToAxis = false
-    xa.PackCharts(pack_atlas, pack_options)
-
-    ensure(pack_atlas.atlasCount == 1)
-    ensure(pack_atlas.width == 4096)
-    ensure(pack_atlas.height == 4096)
-    fmt.println("Done packing charts.")
-
-    fmt.println("Atlas utilization:", pack_atlas.utilization^)
-
-    // Extract the transforms and the chart_idx from the packing.
-    chart_base: i32 = 0
+    // Extract per-instance chart transforms.
     for &instance, instance_idx in scene.instances
     {
         mesh_idx := instance.mesh_idx
-        packed := pack_atlas.meshes[instance_idx]
+        packed_mesh := atlas.meshes[mesh_idx]
 
-        offsets := make([dynamic][2]f32, packed.chartCount)
-        defer delete(offsets)
+        packed_instance := atlas.meshInstances[instance_idx]
+        instance.lm_chart_base = packed_instance.chartTransformBase
 
-        seen := make([]bool, packed.chartCount)
-        defer delete(seen)
-
-        for v in packed.vertexArray[:packed.vertexCount]
+        for chart_idx in 0..<packed_mesh.chartCount
         {
-            if v.chartIndex < 0 do continue
+            transform_idx := packed_instance.chartTransformBase + u32(chart_idx)
 
-            global_chart := i32(v.chartIndex)
-            local_chart := global_chart - chart_base
+            src := atlas.chartTransforms[transform_idx]
 
-            assert(local_chart < i32(packed.chartCount))
-
-            scene.meshes[mesh_idx].lm_chart_indices[v.xref] = local_chart
-
-            if !seen[local_chart]
-            {
-                src := scene.meshes[mesh_idx].lm_uvs[v.xref]
-
-                dst := [2]f32 {
-                    v.uv[0],
-                    v.uv[1],
-                }
-
-                offsets[local_chart] = dst - src
-                seen[local_chart] = true
-            }
-        }
-
-        // Store these offsets for this instance.
-        instance.lm_chart_base = u32(chart_base)
-
-        for chart_idx in 0..<packed.chartCount
-        {
             chart := Lightmap_Chart {
-                offset = offsets[chart_idx]
+                x = [2]f32 {
+                    src.mat[0],
+                    src.mat[2],
+                },
+                y = [2]f32 {
+                    src.mat[1],
+                    src.mat[3],
+                },
+                offset = [2]f32 {
+                    src.offset[0],
+                    src.offset[1],
+                },
             }
+
             append(&scene.lm_charts, chart)
         }
-
-        chart_base += i32(packed.chartCount)
     }
+
+    return [2]i32 { i32(atlas.width), i32(atlas.height) }
 }
