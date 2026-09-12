@@ -1,5 +1,6 @@
 
 #+vet !unused-variables
+#+vet !unused-imports
 
 package main
 
@@ -7,6 +8,8 @@ import intr "base:intrinsics"
 import "base:runtime"
 import "core:fmt"
 import "core:image"
+import "core:image/png"
+import "core:image/jpeg"
 import log "core:log"
 import "core:math"
 import "core:math/linalg"
@@ -81,7 +84,7 @@ main :: proc()
     max_delta_time: f32 = 1.0 / 10.0 // 10fps
 
     window_flags :: sdl.WindowFlags { .HIGH_PIXEL_DENSITY, .VULKAN, .RESIZABLE, .MAXIMIZED }
-    window := sdl.CreateWindow("test_lightmapper", 1000, 1000, window_flags)
+    window := sdl.CreateWindow("lightmapper_rt DEMO", 1000, 1000, window_flags)
     ensure(window != nil)
 
     window_size_x: i32
@@ -123,8 +126,6 @@ main :: proc()
 
     upload_arena := gpu.arena_create()
     defer gpu.arena_destroy(&upload_arena)
-    bvh_scratch_arena := gpu.arena_create(mem_type = .GPU)
-    defer gpu.arena_destroy(&bvh_scratch_arena)
 
     upload_sem = gpu.semaphore_create()
     defer gpu.semaphore_destroy(upload_sem)
@@ -238,7 +239,7 @@ main :: proc()
     lm.init(&lm_ctx, &desc_pool)
     defer lm.cleanup(&lm_ctx)
 
-    scene := upload_scene(gltf_scene, &lm_ctx, &upload_arena, &bvh_scratch_arena, upload_cmd_buf, skip_lightmap)
+    scene := upload_scene(gltf_scene, &lm_ctx, &upload_arena, upload_cmd_buf, skip_lightmap)
     defer scene_destroy(&scene)
 
     anisotropy := min(16.0, gpu.device_limits().max_anisotropy)
@@ -472,7 +473,7 @@ main :: proc()
                 })
                 gpu.cmd_set_shaders(cmd_buf, vert_shader_lit, frag_shader_lit)
 
-                gpu.cmd_set_raster_state(cmd_buf, { cull_mode = .None, alpha_to_coverage = true })
+                gpu.cmd_set_raster_state(cmd_buf, { alpha_to_coverage = true })
 
                 // Set texture and sampler heaps
                 gpu.cmd_set_desc_heap(cmd_buf, desc_pool)
@@ -636,7 +637,6 @@ Mesh_GPU :: struct
     indices: gpu.slice_t(u32),
     idx_count: u32,
     vert_count: u32,
-    // bvh: gpu.Owned_BVH,
     lm_mesh_handle: lm.Mesh_Handle,
     lm_uv_handle: lm.Lightmap_UV_Handle,
 }
@@ -680,7 +680,6 @@ upload_mesh :: proc(upload_arena: ^gpu.Arena, cmd_buf: gpu.Command_Buffer, mesh:
 
 mesh_destroy :: proc(mesh: ^Mesh_GPU)
 {
-    // gpu.bvh_free_and_destroy(&mesh.bvh)
     gpu.mem_free(mesh.pos)
     gpu.mem_free(mesh.normals)
     gpu.mem_free(mesh.uvs)
@@ -688,38 +687,6 @@ mesh_destroy :: proc(mesh: ^Mesh_GPU)
     gpu.mem_free(mesh.lm_chart_indices)
     gpu.mem_free(mesh.indices)
     mesh^ = {}
-}
-
-build_blas :: proc(bvh_scratch_arena: ^gpu.Arena, cmd_buf: gpu.Command_Buffer, positions: gpu.slice_t([4]f32), indices: gpu.slice_t(u32), idx_count: u32, vert_count: u32) -> gpu.Owned_BVH
-{
-    assert(idx_count % 3 == 0)
-
-    desc := gpu.BLAS_Desc {
-        hint = .Prefer_Fast_Trace,
-        shapes = {
-            gpu.BVH_Mesh_Desc {
-                vertex_stride = 16,
-                max_vertex = vert_count - 1,
-                tri_count = idx_count / 3,
-            }
-        }
-    }
-    bvh := gpu.bvh_alloc_and_create(desc)
-    scratch := gpu.bvh_alloc_build_scratch_buffer(bvh_scratch_arena, desc)
-    gpu.cmd_build_blas(cmd_buf, bvh, scratch, { gpu.BVH_Mesh { verts = positions.gpu.ptr, indices = indices.gpu.ptr } })
-    return bvh
-}
-
-build_tlas :: proc(bvh_scratch_arena: ^gpu.Arena, cmd_buf: gpu.Command_Buffer, instances: gpu.gpuptr, instance_count: u32) -> gpu.Owned_BVH
-{
-    desc := gpu.TLAS_Desc {
-        hint = .Prefer_Fast_Trace,
-        instance_count = instance_count
-    }
-    bvh := gpu.bvh_alloc_and_create(desc)
-    scratch := gpu.bvh_alloc_build_scratch_buffer(bvh_scratch_arena, desc)
-    gpu.cmd_build_tlas(cmd_buf, bvh, scratch, instances)
-    return bvh
 }
 
 Scene_GPU :: struct
@@ -742,7 +709,7 @@ Lights_Shader :: struct
     dir_light_emission: [3]f32,
 }
 
-upload_scene :: proc(scene: shared.Scene, lm_ctx: ^lm.Context, upload_arena: ^gpu.Arena, bvh_scratch_arena: ^gpu.Arena, cmd_buf: gpu.Command_Buffer, skip_lightmap: bool) -> Scene_GPU
+upload_scene :: proc(scene: shared.Scene, lm_ctx: ^lm.Context, upload_arena: ^gpu.Arena, cmd_buf: gpu.Command_Buffer, skip_lightmap: bool) -> Scene_GPU
 {
     res: Scene_GPU
 

@@ -10,8 +10,6 @@ import "core:mem"
 import "core:slice"
 import "gltf2"
 import "core:image"
-import "core:image/jpeg"
-import "core:image/png"
 import intr "base:intrinsics"
 import "core:c"
 

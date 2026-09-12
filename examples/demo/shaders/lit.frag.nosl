@@ -19,20 +19,28 @@ main :: (normal_vert: vec4 @io(0), uv: vec2 @io(1, centroid), lm_uv: vec2 @io(2,
     // Sample base color texture
     base_color := texture_sample(data.base_color_map, data.base_color_map_sampler, uv) * data.base_color;
     // Trick to get crisp AA on foliage.
-    // base_color.a = (base_color.a - 0.3) / max(fwidth_(base_color.a), 0.0001) + 0.5;
+    base_color.a = (base_color.a - 0.3) / max(fwidth_(base_color.a), 0.0001) + 0.5;
 
     if data.sample_diffuse && !data.sample_lightmap {
         return base_color;
     }
 
     irradiance: vec3;
-    if data.do_bicubic_sampling {
+    if data.do_bicubic_sampling
+    {
         lm_sample := texture_sample_bicubic(data.lightmap, data.lightmap_sampler, lm_uv);
         irradiance = lm_sample.rgb;
+
+        // This is just to test the lightmapper, ideally
+        // in production if this were to happen you should
+        // probably pick a less visible color for this, most likely black.
+        // This should not happen but it could, e.g. with very thin geometry.
         if lm_sample.a < 0.5 {
             return vec4(1, 0, 1, base_color.a);
         }
-    } else {
+    }
+    else
+    {
         lm_sample := texture_sample(data.lightmap, data.lightmap_sampler, lm_uv);
         irradiance = lm_sample.rgb;
         if lm_sample.a < 0.5 {
