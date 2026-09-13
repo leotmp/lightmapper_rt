@@ -276,7 +276,7 @@ foreign xatlas_clib
 
     when CUSTOM_FORK
     {
-        AddMeshInstance :: proc(atlas: ^Atlas, meshIndex: u32) -> u32 ---
+        AddMeshInstance :: proc(atlas: ^Atlas, meshIndex: u32, scale: f32 = 1.0) -> u32 ---
     }
 
     // Wait for AddMesh async processing to finish. ComputeCharts / Generate call this internally.

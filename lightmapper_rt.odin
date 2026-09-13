@@ -152,6 +152,9 @@ remove_lightmap_uvs :: proc(ctx: ^Context, handle: ^Lightmap_UV_Handle)
 Bake :: struct
 {
     ctx: ^Context,
+    has_scene: bool,
+    has_lights: bool,
+
     gbufs: GBuffers,
     instances: [dynamic]Instance,
     lights: Lights,
@@ -221,11 +224,6 @@ bake_begin :: proc(ctx: ^Context, lightmap_size: [2]i32, samples: u32, lightmap:
     return bake_begin_impl(ctx, lightmap_size, samples, lightmap, instances, charts, lights)
 }
 
-bake_scene_changed :: proc(bake: ^Bake, instances: []Instance, lights: Lights) -> bool
-{
-    return bake.lights != lights
-}
-
 bake_reset :: proc(bake: ^Bake)
 {
     bake.accum_counter = 0
@@ -233,7 +231,17 @@ bake_reset :: proc(bake: ^Bake)
 
 bake_progress :: proc(bake: ^Bake) -> f32
 {
-    return f32(bake.accum_counter) / f32(bake.max_samples)
+    return f32(bake.accum_counter) / f32(bake.max_samples) if bake.max_samples != 0 else 0
+}
+
+bake_submit_scene :: proc(bake: ^Bake, instances: []Instance)
+{
+
+}
+
+bake_submit_lights :: proc(bake: ^Bake, lights: Lights)
+{
+
 }
 
 bake_iteration :: proc(bake: ^Bake, frame_arena: ^gpu.Arena, instances: []Instance, lights: Lights, fix_seams: bool, denoise_on_preview: bool)

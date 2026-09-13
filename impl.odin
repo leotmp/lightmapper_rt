@@ -109,13 +109,10 @@ bake_begin_impl :: proc(ctx: ^Context, lightmap_size: [2]i32, samples: u32, ligh
 
 bake_iteration_impl :: proc(bake: ^Bake, frame_arena: ^gpu.Arena, instances: []Instance, lights: Lights, fix_seams: bool, denoise_on_preview: bool)
 {
+    //ensure(bake.has_scene,  "Scene not submitted for this bake!")
+    //ensure(bake.has_lights, "Lights not submitted for this bake!")
+
     if !fix_seams && bake.accum_counter >= bake.max_samples do return
-
-    delete(bake.instances)
-    bake.instances = slice.clone_to_dynamic(instances)
-    bake.lights = lights
-
-    if bake.accum_counter >= bake.max_samples do return
 
     resolution := [2]f32 { f32(bake.lightmap_size.x), f32(bake.lightmap_size.y) }
 

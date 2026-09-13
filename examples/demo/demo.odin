@@ -447,7 +447,7 @@ main :: proc()
                     }
                 }
             }
-            if ui.do_reset_bake || lm.bake_scene_changed(&bake, lm_instances, ui.lights) {
+            if ui.do_reset_bake {
                 lm.bake_reset(&bake)
                 pathtrace_gt_counter = 0
             }
@@ -1631,25 +1631,26 @@ ui_update :: proc(ui: ^UI_State, scene: ^shared.Scene, debug_viz_draw_calls: []U
 
             imgui.separator_text("Scene settings (require bake reset)")
             {
+                ui.do_reset_bake = false
+
                 imgui.push_item_width(SETTINGS_WIDTH / 2)
-                imgui.drag_float("###azimuth", &ui.light_azimuth, 0.5, -180, 180)
+                ui.do_reset_bake |= imgui.drag_float("###azimuth", &ui.light_azimuth, 0.5, -180, 180)
                 imgui.same_line()
-                imgui.drag_float("Sun Angle", &ui.light_elevation, 0.5, -90, 90)
+                ui.do_reset_bake |= imgui.drag_float("Sun Angle", &ui.light_elevation, 0.5, -90, 90)
                 ui.lights.sun_dir = dir_from_spherical_coords(math.RAD_PER_DEG * ui.light_azimuth, math.RAD_PER_DEG * ui.light_elevation)
                 imgui.pop_item_width()
 
-                imgui.drag_float("Sun Radius (degrees)", &ui.light_radius_deg, 0.01, 0.0000001)
+                ui.do_reset_bake |= imgui.drag_float("Sun Radius (degrees)", &ui.light_radius_deg, 0.01, 0.0000001)
                 ui.lights.sun_radius = math.RAD_PER_DEG * ui.light_radius_deg
 
                 imgui.push_item_width(SETTINGS_WIDTH / 3)
-                imgui.drag_float("###emission_x", &ui.lights.sun_emission.x, 1)
+                ui.do_reset_bake |= imgui.drag_float("###emission_x", &ui.lights.sun_emission.x, 1)
                 imgui.same_line()
-                imgui.drag_float("###emission_y", &ui.lights.sun_emission.y, 1)
+                ui.do_reset_bake |= imgui.drag_float("###emission_y", &ui.lights.sun_emission.y, 1)
                 imgui.same_line()
-                imgui.drag_float("Sun Emission", &ui.lights.sun_emission.z, 1)
+                ui.do_reset_bake |= imgui.drag_float("Sun Emission", &ui.lights.sun_emission.z, 1)
                 imgui.pop_item_width()
 
-                ui.do_reset_bake = false
                 if imgui.button("Reset Bake") do ui.do_reset_bake = true
             }
 
@@ -1658,18 +1659,16 @@ ui_update :: proc(ui: ^UI_State, scene: ^shared.Scene, debug_viz_draw_calls: []U
                 @(static) cube_positions: [2][3]f32
                 @(static) cube_rotations: [2][3]f32
                 @(static) cube_scales := [2][3]f32{
-                    {1, 1, 1},
-                    {1, 1, 1},
+                    {1, 1, -1},
+                    {1, 1, -1},
                 }
 
-                //for cube_idx in 0..<2
-                when false
+                for cube_idx in 0..<2
                 {
                     instance_idx := len(scene.instances) - 2 + cube_idx
                     instance := &scene.instances[instance_idx]
                     imgui.push_id_int(i32(instance_idx))
 
-                    /*
                     changed := false
                     changed |= imgui.drag_float3("Position", &cube_positions[cube_idx], 0.05)
                     changed |= imgui.drag_float3("Scale", &cube_scales[cube_idx], 0.05, 0.001)
@@ -1678,7 +1677,6 @@ ui_update :: proc(ui: ^UI_State, scene: ^shared.Scene, debug_viz_draw_calls: []U
                         instance.transform = shared.xform_to_mat(cube_positions[cube_idx], 1 /* cube_rotations[cube_idx] */, cube_scales[cube_idx])
                         ui.do_reset_bake = true
                     }
-                    */
 
                     imgui.pop_id()
                 }

@@ -41,11 +41,19 @@ for true
     if !bake.has_scene || scene_has_changed
     {
         lm_instances := /* Convert your scene into []lm.Instance */
+        lm.bake_submit_scene(&bake, lm_instances)
+        lm.bake_reset(&bake)
+    }
+    lights_have_changed := /* Detect if your lights have changed */
+    if !bake.has_lights || lights_have_changed
+    {
         lm_lights := /* Convert your lights into lm.Lights */
-        lm.submit_scene(&bake, lm_instances, lm_lights)
+        lm.bake_submit_lights(&bake, lm_lights)
         lm.bake_reset(&bake)
     }
     lm.bake_iteration(&bake, frame_arena, do_denoise)
+
+    fmt.printfln("Bake progress: %v%%", lm.bake_progress(&bake))
 }
 
 gpu.wait_idle()

@@ -805,21 +805,16 @@ load_scene_gltf :: proc(
     {
         flip_z: matrix[4, 4]f32 = 1
         flip_z[2, 2] = -1
-        flip_z[0, 0] *= 0.008
-        flip_z[1, 1] *= 0.008
-        flip_z[2, 2] *= 0.008
         append(&instances, Instance {
             transform = flip_z,
             mesh_idx  = cube_mesh_idx,
             base_color = meshes[cube_mesh_idx].base_color,
         })
-        /*
         append(&instances, Instance {
             transform = flip_z,
             mesh_idx  = cube_mesh_idx,
             base_color = meshes[cube_mesh_idx].base_color,
         })
-        */
     }
 
     scene := Scene { instances = instances, meshes = meshes }
@@ -967,40 +962,40 @@ build_sphere :: proc(radius: f32 = 0.5, lat_segments := 32, lon_segments := 32) 
 
 CUBE_VERTS := [][3]f32{
     // Front (+Z)
-    {-0.5, -0.5,  0.5} * 80,
-    { 0.5, -0.5,  0.5} * 80,
-    { 0.5,  0.5,  0.5} * 80,
-    {-0.5,  0.5,  0.5} * 80,
+    {-0.5, -0.5,  0.5},
+    { 0.5, -0.5,  0.5},
+    { 0.5,  0.5,  0.5},
+    {-0.5,  0.5,  0.5},
 
     // Back (-Z)
-    { 0.5, -0.5, -0.5} * 80,
-    {-0.5, -0.5, -0.5} * 80,
-    {-0.5,  0.5, -0.5} * 80,
-    { 0.5,  0.5, -0.5} * 80,
+    { 0.5, -0.5, -0.5},
+    {-0.5, -0.5, -0.5},
+    {-0.5,  0.5, -0.5},
+    { 0.5,  0.5, -0.5},
 
     // Left (-X)
-    {-0.5, -0.5, -0.5} * 80,
-    {-0.5, -0.5,  0.5} * 80,
-    {-0.5,  0.5,  0.5} * 80,
-    {-0.5,  0.5, -0.5} * 80,
+    {-0.5, -0.5, -0.5},
+    {-0.5, -0.5,  0.5},
+    {-0.5,  0.5,  0.5},
+    {-0.5,  0.5, -0.5},
 
     // Right (+X)
-    { 0.5, -0.5,  0.5} * 80,
-    { 0.5, -0.5, -0.5} * 80,
-    { 0.5,  0.5, -0.5} * 80,
-    { 0.5,  0.5,  0.5} * 80,
+    { 0.5, -0.5,  0.5},
+    { 0.5, -0.5, -0.5},
+    { 0.5,  0.5, -0.5},
+    { 0.5,  0.5,  0.5},
 
     // Top (+Y)
-    {-0.5,  0.5,  0.5} * 80,
-    { 0.5,  0.5,  0.5} * 80,
-    { 0.5,  0.5, -0.5} * 80,
-    {-0.5,  0.5, -0.5} * 80,
+    {-0.5,  0.5,  0.5},
+    { 0.5,  0.5,  0.5},
+    { 0.5,  0.5, -0.5},
+    {-0.5,  0.5, -0.5},
 
     // Bottom (-Y)
-    {-0.5, -0.5, -0.5} * 80,
-    { 0.5, -0.5, -0.5} * 80,
-    { 0.5, -0.5,  0.5} * 80,
-    {-0.5, -0.5,  0.5} * 80,
+    {-0.5, -0.5, -0.5},
+    { 0.5, -0.5, -0.5},
+    { 0.5, -0.5,  0.5},
+    {-0.5, -0.5,  0.5},
 }
 
 CUBE_NORMALS := [][3]f32{
@@ -1095,6 +1090,7 @@ generate_lightmap_uvs :: proc(scene: ^Scene, target_lm_size: u32) -> [2]i32
         res := xa.AddMesh(atlas, mesh_decl, 0)
         if res != .SUCCESS {
             fmt.printfln("XAtlas Error: %v", xa.StringForEnum(res))
+            assert(false)
             return [2]i32 { i32(target_lm_size), i32(target_lm_size) }
         }
     }
@@ -1102,7 +1098,12 @@ generate_lightmap_uvs :: proc(scene: ^Scene, target_lm_size: u32) -> [2]i32
     // Register instances
     for instance in scene.instances
     {
-        xa.AddMeshInstance(atlas, instance.mesh_idx)
+        m := instance.transform
+        sx := linalg.length(m[0].xyz)
+        sy := linalg.length(m[1].xyz)
+        sz := linalg.length(m[2].xyz)
+        max_scale := max(sx, sy, sz)
+        xa.AddMeshInstance(atlas, instance.mesh_idx, max_scale)
     }
 
     fmt.println("Computing mesh charts (this should be done during the mesh import step)...")
