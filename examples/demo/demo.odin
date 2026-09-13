@@ -1662,7 +1662,8 @@ ui_update :: proc(ui: ^UI_State, scene: ^shared.Scene, debug_viz_draw_calls: []U
                     {1, 1, 1},
                 }
 
-                for cube_idx in 0..<2
+                //for cube_idx in 0..<2
+                when false
                 {
                     instance_idx := len(scene.instances) - 2 + cube_idx
                     instance := &scene.instances[instance_idx]

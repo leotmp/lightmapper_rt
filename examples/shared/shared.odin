@@ -779,6 +779,7 @@ load_scene_gltf :: proc(
             flip_z[2, 2] = -1
             local_transform := xform_to_mat(node.translation, node.rotation, node.scale)
             transform := parent_transform * local_transform
+            fmt.println(transform)
             if node.mesh != nil {
                 mesh_idx := node.mesh.?
                 mesh := data.meshes[mesh_idx]
@@ -804,16 +805,21 @@ load_scene_gltf :: proc(
     {
         flip_z: matrix[4, 4]f32 = 1
         flip_z[2, 2] = -1
+        flip_z[0, 0] *= 0.008
+        flip_z[1, 1] *= 0.008
+        flip_z[2, 2] *= 0.008
         append(&instances, Instance {
             transform = flip_z,
             mesh_idx  = cube_mesh_idx,
             base_color = meshes[cube_mesh_idx].base_color,
         })
+        /*
         append(&instances, Instance {
             transform = flip_z,
             mesh_idx  = cube_mesh_idx,
             base_color = meshes[cube_mesh_idx].base_color,
         })
+        */
     }
 
     scene := Scene { instances = instances, meshes = meshes }
@@ -961,40 +967,40 @@ build_sphere :: proc(radius: f32 = 0.5, lat_segments := 32, lon_segments := 32) 
 
 CUBE_VERTS := [][3]f32{
     // Front (+Z)
-    {-0.5, -0.5,  0.5},
-    { 0.5, -0.5,  0.5},
-    { 0.5,  0.5,  0.5},
-    {-0.5,  0.5,  0.5},
+    {-0.5, -0.5,  0.5} * 80,
+    { 0.5, -0.5,  0.5} * 80,
+    { 0.5,  0.5,  0.5} * 80,
+    {-0.5,  0.5,  0.5} * 80,
 
     // Back (-Z)
-    { 0.5, -0.5, -0.5},
-    {-0.5, -0.5, -0.5},
-    {-0.5,  0.5, -0.5},
-    { 0.5,  0.5, -0.5},
+    { 0.5, -0.5, -0.5} * 80,
+    {-0.5, -0.5, -0.5} * 80,
+    {-0.5,  0.5, -0.5} * 80,
+    { 0.5,  0.5, -0.5} * 80,
 
     // Left (-X)
-    {-0.5, -0.5, -0.5},
-    {-0.5, -0.5,  0.5},
-    {-0.5,  0.5,  0.5},
-    {-0.5,  0.5, -0.5},
+    {-0.5, -0.5, -0.5} * 80,
+    {-0.5, -0.5,  0.5} * 80,
+    {-0.5,  0.5,  0.5} * 80,
+    {-0.5,  0.5, -0.5} * 80,
 
     // Right (+X)
-    { 0.5, -0.5,  0.5},
-    { 0.5, -0.5, -0.5},
-    { 0.5,  0.5, -0.5},
-    { 0.5,  0.5,  0.5},
+    { 0.5, -0.5,  0.5} * 80,
+    { 0.5, -0.5, -0.5} * 80,
+    { 0.5,  0.5, -0.5} * 80,
+    { 0.5,  0.5,  0.5} * 80,
 
     // Top (+Y)
-    {-0.5,  0.5,  0.5},
-    { 0.5,  0.5,  0.5},
-    { 0.5,  0.5, -0.5},
-    {-0.5,  0.5, -0.5},
+    {-0.5,  0.5,  0.5} * 80,
+    { 0.5,  0.5,  0.5} * 80,
+    { 0.5,  0.5, -0.5} * 80,
+    {-0.5,  0.5, -0.5} * 80,
 
     // Bottom (-Y)
-    {-0.5, -0.5, -0.5},
-    { 0.5, -0.5, -0.5},
-    { 0.5, -0.5,  0.5},
-    {-0.5, -0.5,  0.5},
+    {-0.5, -0.5, -0.5} * 80,
+    { 0.5, -0.5, -0.5} * 80,
+    { 0.5, -0.5,  0.5} * 80,
+    {-0.5, -0.5,  0.5} * 80,
 }
 
 CUBE_NORMALS := [][3]f32{
@@ -1106,7 +1112,7 @@ generate_lightmap_uvs :: proc(scene: ^Scene, target_lm_size: u32) -> [2]i32
     pack_options := xa.make_pack_options()
     pack_options.blockAlign = true
     pack_options.texelsPerUnit = 0  // Will attempt to get close to the provided resolution
-    pack_options.resolution = 4096
+    pack_options.resolution = target_lm_size
     pack_options.padding = 1
     pack_options.bilinear = true
     pack_options.rotateCharts = false
