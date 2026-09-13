@@ -58,3 +58,10 @@ for true
 
 gpu.wait_idle()
 ```
+
+TODO:
+- Fix API things and update BVH
+- Add lightmap creation proc
+- Add options (rays per pixel, denoise tile size)
+- Fix denoise things
+- Find/make some nice scenes for social media points

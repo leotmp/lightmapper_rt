@@ -779,7 +779,6 @@ load_scene_gltf :: proc(
             flip_z[2, 2] = -1
             local_transform := xform_to_mat(node.translation, node.rotation, node.scale)
             transform := parent_transform * local_transform
-            fmt.println(transform)
             if node.mesh != nil {
                 mesh_idx := node.mesh.?
                 mesh := data.meshes[mesh_idx]
