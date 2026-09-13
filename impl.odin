@@ -475,7 +475,7 @@ upload_bvh_instances :: proc(upload_arena: ^gpu.Arena, cmd_buf: gpu.Command_Buff
             transform = transform_to_gpu_transform(instances[i].transform),
             blas_root = gpu.bvh_root_ptr(meshes[instances[i].mesh_handle.idx].info.bvh),
             disable_culling = true,
-            flip_facing = true,
+            flip_facing = false,
             mask = 1,
         }
     }

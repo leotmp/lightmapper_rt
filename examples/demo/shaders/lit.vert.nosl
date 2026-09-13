@@ -41,7 +41,7 @@ main :: (vert_id: uint @vert_id, data: ^Data @data) -> Output
     clip_pos = data.view_to_proj * clip_pos;
     clip_pos.y = 0.0 - clip_pos.y;
 
-    world_normal := data.model_to_world_normal * vec4(data.normals[vert_id], 1);
+    world_normal := data.model_to_world_normal * vec4(data.normals[vert_id], 0);
 
     chart_idx := data.lm_chart_indices[vert_id];
     chart_base := data.lm_chart_base;

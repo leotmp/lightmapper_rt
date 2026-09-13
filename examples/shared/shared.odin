@@ -740,6 +740,24 @@ load_scene_gltf :: proc(
         }
     }
 
+    // Add a cube mesh for testing.
+    cube_mesh_idx: u32
+    {
+        base_color_map: u32 = white_texture_id
+        base_color: [4]f32 = { 1, 1, 1, 1 }
+        append(&start_idx, u32(len(meshes)))
+        cube := Mesh {
+            pos = slice.clone_to_dynamic(CUBE_VERTS),
+            normals = slice.clone_to_dynamic(CUBE_NORMALS),
+            uvs = slice.clone_to_dynamic(CUBE_UVS),
+            indices = slice.clone_to_dynamic(CUBE_INDICES),
+            base_color_map = base_color_map,
+            base_color = base_color,
+        }
+        append(&meshes, cube)
+        cube_mesh_idx = u32(len(meshes)) - 1
+    }
+
     // Load instances
     instances: [dynamic]Instance
     for node_idx in data.scenes[0].nodes {
@@ -780,6 +798,22 @@ load_scene_gltf :: proc(
                 traverse_node(instances, data, transform, int(child), meshes, start_idx)
             }
         }
+    }
+
+    // Add 2 cube instances for testing.
+    {
+        flip_z: matrix[4, 4]f32 = 1
+        flip_z[2, 2] = -1
+        append(&instances, Instance {
+            transform = flip_z,
+            mesh_idx  = cube_mesh_idx,
+            base_color = meshes[cube_mesh_idx].base_color,
+        })
+        append(&instances, Instance {
+            transform = flip_z,
+            mesh_idx  = cube_mesh_idx,
+            base_color = meshes[cube_mesh_idx].base_color,
+        })
     }
 
     scene := Scene { instances = instances, meshes = meshes }
@@ -925,23 +959,92 @@ build_sphere :: proc(radius: f32 = 0.5, lat_segments := 32, lon_segments := 32) 
     return verts, indices
 }
 
-UNIT_CUBE_VERTS := [][3]f32{
-    {-0.5, -0.5, -0.5},
-    { 0.5, -0.5, -0.5},
-    { 0.5,  0.5, -0.5},
-    {-0.5,  0.5, -0.5},
+CUBE_VERTS := [][3]f32{
+    // Front (+Z)
     {-0.5, -0.5,  0.5},
     { 0.5, -0.5,  0.5},
     { 0.5,  0.5,  0.5},
     {-0.5,  0.5,  0.5},
+
+    // Back (-Z)
+    { 0.5, -0.5, -0.5},
+    {-0.5, -0.5, -0.5},
+    {-0.5,  0.5, -0.5},
+    { 0.5,  0.5, -0.5},
+
+    // Left (-X)
+    {-0.5, -0.5, -0.5},
+    {-0.5, -0.5,  0.5},
+    {-0.5,  0.5,  0.5},
+    {-0.5,  0.5, -0.5},
+
+    // Right (+X)
+    { 0.5, -0.5,  0.5},
+    { 0.5, -0.5, -0.5},
+    { 0.5,  0.5, -0.5},
+    { 0.5,  0.5,  0.5},
+
+    // Top (+Y)
+    {-0.5,  0.5,  0.5},
+    { 0.5,  0.5,  0.5},
+    { 0.5,  0.5, -0.5},
+    {-0.5,  0.5, -0.5},
+
+    // Bottom (-Y)
+    {-0.5, -0.5, -0.5},
+    { 0.5, -0.5, -0.5},
+    { 0.5, -0.5,  0.5},
+    {-0.5, -0.5,  0.5},
 }
+
+CUBE_NORMALS := [][3]f32{
+    { 0,  0,  1},
+    { 0,  0,  1},
+    { 0,  0,  1},
+    { 0,  0,  1},
+
+    { 0,  0, -1},
+    { 0,  0, -1},
+    { 0,  0, -1},
+    { 0,  0, -1},
+
+    {-1,  0,  0},
+    {-1,  0,  0},
+    {-1,  0,  0},
+    {-1,  0,  0},
+
+    { 1,  0,  0},
+    { 1,  0,  0},
+    { 1,  0,  0},
+    { 1,  0,  0},
+
+    { 0,  1,  0},
+    { 0,  1,  0},
+    { 0,  1,  0},
+    { 0,  1,  0},
+
+    { 0, -1,  0},
+    { 0, -1,  0},
+    { 0, -1,  0},
+    { 0, -1,  0},
+}
+
+CUBE_UVS := [][2]f32{
+    {0, 0}, {1, 0}, {1, 1}, {0, 1},
+    {0, 0}, {1, 0}, {1, 1}, {0, 1},
+    {0, 0}, {1, 0}, {1, 1}, {0, 1},
+    {0, 0}, {1, 0}, {1, 1}, {0, 1},
+    {0, 0}, {1, 0}, {1, 1}, {0, 1},
+    {0, 0}, {1, 0}, {1, 1}, {0, 1},
+}
+
 CUBE_INDICES := []u32{
-    4, 6, 5, 4, 7, 6, // Front (+Z)
-    1, 3, 0, 1, 2, 3, // Back (-Z)
-    0, 7, 4, 0, 3, 7, // Left (-X)
-    5, 2, 1, 5, 6, 2, // Right (+X)
-    3, 6, 7, 3, 2, 6, // Top (+Y)
-    0, 5, 1, 0, 4, 5, // Bottom (-Y)
+     0,  1,  2,  0,  2,  3, // Front (+Z)
+     4,  5,  6,  4,  6,  7, // Back (-Z)
+     8,  9, 10,  8, 10, 11, // Left (-X)
+    12, 13, 14, 12, 14, 15, // Right (+X)
+    16, 17, 18, 16, 18, 19, // Top (+Y)
+    20, 21, 22, 20, 22, 23, // Bottom (-Y)
 }
 
 // Lightmap

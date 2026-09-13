@@ -306,7 +306,7 @@ ray_scene_intersection :: (ray: Ray, scene: Scene, tlas: bvh_id) -> Hit_Info
     n1 := mesh.normal[indices[base_idx+1]];
     n2 := mesh.normal[indices[base_idx+2]];
     normal := normalize(n0 * w + n1 * hit.barycentrics.x + n2 * hit.barycentrics.y);
-    if hit.front_face { normal *= -1.0; }
+    if !hit.front_face { normal *= -1.0; }
     world_normal := normalize(transpose(hit.world_to_object) * normal.xyz);
 
     bary := hit.barycentrics;

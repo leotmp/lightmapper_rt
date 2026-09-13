@@ -410,7 +410,7 @@ main :: proc()
                 scale = {},
             })
         }
-        ui_update(&ui, draw_calls[:], { gbuf_world_pos_id, gbuf_world_normals_id, lightmap_id }, { "World Position", "World Normals", "Lightmap" }, lm.bake_progress(&bake), skip_lightmap, lm_size)
+        ui_update(&ui, &gltf_scene, draw_calls[:], { gbuf_world_pos_id, gbuf_world_normals_id, lightmap_id }, { "World Position", "World Normals", "Lightmap" }, lm.bake_progress(&bake), skip_lightmap, lm_size)
         // ui_update_animation(&ui, delta_time)
 
         if skip_lightmap do ui.sample_lightmap = false
@@ -1541,7 +1541,7 @@ make_ui_default :: proc() -> UI_State
     return res
 }
 
-ui_update :: proc(ui: ^UI_State, debug_viz_draw_calls: []UV_Mesh_Draw_Call, texture_ids: []u32, texture_names: []cstring, bake_progress: f32, skip_lightmap: bool, lm_size: [2]i32)
+ui_update :: proc(ui: ^UI_State, scene: ^shared.Scene, debug_viz_draw_calls: []UV_Mesh_Draw_Call, texture_ids: []u32, texture_names: []cstring, bake_progress: f32, skip_lightmap: bool, lm_size: [2]i32)
 {
     if imgui.begin_main_menu_bar()
     {
@@ -1654,62 +1654,32 @@ ui_update :: proc(ui: ^UI_State, debug_viz_draw_calls: []UV_Mesh_Draw_Call, text
             }
 
             imgui.separator_text("Edit static entities")
-            when false
             {
-                Cube_Instance_UI :: struct {
-                    position: [3]f32,
-                    rotation: [3]f32,
-                    scale:    [3]f32,
+                @(static) cube_positions: [2][3]f32
+                @(static) cube_rotations: [2][3]f32
+                @(static) cube_scales := [2][3]f32{
+                    {1, 1, 1},
+                    {1, 1, 1},
                 }
 
-                @(static) test_instances := []Cube_Instance_UI {
-                    {
-                        position = { 0, 0, 0 },
-                        rotation = { 0, 0, 0 },
-                        scale    = { 1, 1, 1 },
-                    },
-                    {
-                        position = { 2.5, 0.5, -1 },
-                        rotation = { 0, 45, 0 },
-                        scale    = { 1, 2, 1 },
-                    },
-                    {
-                        position = { -3, 1, 2 },
-                        rotation = { 15, 0, 30 },
-                        scale    = { 0.5, 0.5, 0.5 },
-                    },
-                }
-
-                for instance, idx in test_instances
+                for cube_idx in 0..<2
                 {
-                    imgui.push_id_int(idx)
+                    instance_idx := len(scene.instances) - 2 + cube_idx
+                    instance := &scene.instances[instance_idx]
+                    imgui.push_id_int(i32(instance_idx))
 
-                    label := fmt.tprintf("Cube %d", idx + 1)
-
-                    if imgui.collapsing_header(label)
+                    /*
+                    changed := false
+                    changed |= imgui.drag_float3("Position", &cube_positions[cube_idx], 0.05)
+                    changed |= imgui.drag_float3("Scale", &cube_scales[cube_idx], 0.05, 0.001)
+                    if changed
                     {
-                        imgui.same_line()
-                        if imgui.small_button("X") {
-                            // Delete instance.
-                        }
-
-                        imgui.drag_float3("Position", &instance.position[0], 0.05)
-                        imgui.drag_float3("Rotation", &instance.rotation[0], 0.5)
-                        imgui.drag_float3("Scale",    &instance.scale[0],    0.05, 0.001)
+                        instance.transform = shared.xform_to_mat(cube_positions[cube_idx], 1 /* cube_rotations[cube_idx] */, cube_scales[cube_idx])
+                        ui.do_reset_bake = true
                     }
-                    else
-                    {
-                        imgui.same_line()
-                        if imgui.small_button("X") {
-                            // Delete instance.
-                        }
-                    }
+                    */
 
                     imgui.pop_id()
-                }
-
-                if imgui.button("+") {
-                    // Add cube instance.
                 }
             }
 
@@ -1792,4 +1762,31 @@ create_white_texture :: proc(upload_arena: ^gpu.Arena, cmd_buf: gpu.Command_Buff
     )
     gpu.cmd_copy_to_texture(cmd_buf, texture, staging)
     return texture
+}
+
+decompose_transform :: proc(m: matrix[4, 4]f32) -> (position, rotation, scale: [3]f32) {
+    position = {m[3, 0], m[3, 1], m[3, 2]}
+
+    x := [3]f32{m[0, 0], m[0, 1], m[0, 2]}
+    y := [3]f32{m[1, 0], m[1, 1], m[1, 2]}
+    z := [3]f32{m[2, 0], m[2, 1], m[2, 2]}
+
+    scale = {linalg.length(x), linalg.length(y), linalg.length(z)}
+
+    if scale.x != 0 { x /= scale.x }
+    if scale.y != 0 { y /= scale.y }
+    if scale.z != 0 { z /= scale.z }
+
+    rotation.y = math.asin(clamp(-x.z, -1, 1))
+    if abs(math.cos(rotation.y)) > 0.0001 {
+        rotation.x = math.atan2(y.z, z.z)
+        rotation.z = math.atan2(x.y, x.x)
+    } else {
+        rotation.x = math.atan2(-z.y, y.y)
+        rotation.z = 0
+    }
+
+    rotation *= 180.0 / math.PI
+
+    return
 }
