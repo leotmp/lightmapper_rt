@@ -126,7 +126,9 @@ Lightmap_UVs_Desc :: struct
 
 add_lightmap_uvs :: proc(ctx: ^Context, cmd_buf: gpu.Command_Buffer, desc: Lightmap_UVs_Desc) -> Lightmap_UV_Handle
 {
-    seams_cpu := compute_seams(desc.positions_cpu, desc.normals_cpu, desc.lm_uvs_cpu, desc.indices_cpu)
+    // TODO: Compute seams for seam smoothing!
+    //seams_cpu := compute_seams(desc.positions_cpu, desc.normals_cpu, desc.lm_uvs_cpu, desc.indices_cpu)
+    seams_cpu: []Seam
 
     seams_staging := gpu.arena_alloc(&ctx.upload_arena, Seam, len(seams_cpu))
     copy(seams_staging.cpu, seams_cpu[:])

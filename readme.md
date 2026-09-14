@@ -60,7 +60,9 @@ gpu.wait_idle()
 ```
 
 TODO:
+- Would be nice if charts were cached to disk in these tests...
 - Fix API things and update BVH
+- Lightmap_UVs_Handle should not be a thing
 - Add lightmap creation proc
 - Add options (rays per pixel, denoise tile size)
 - Fix denoise things
