@@ -152,7 +152,7 @@ main :: proc()
     ensure(err_r == nil)
     defer delete(glb_contents)
 
-    gltf_scene, texture_infos, gltf_data, lm_size := shared.load_scene_gltf(glb_contents, magenta_texture_id, white_texture_id, false, LM_TARGET_SIZE)
+    gltf_scene, texture_infos, gltf_data, lm_size := shared.load_scene_gltf(glb_contents, magenta_texture_id, white_texture_id, false, LM_TARGET_SIZE, &desc_pool)
     defer {
         shared.destroy_scene(&gltf_scene)
         gltf2.unload(gltf_data)
@@ -380,9 +380,6 @@ main :: proc()
                     offset = chart.offset,
                 }
             }
-        }
-        if lm.bake_scene_changed(&bake, lm_instances, settings.lights) {
-            lm.bake_reset(&bake)
         }
         lm.bake_iteration(&bake, frame_arena, lm_instances, settings.lights, settings.fix_seams, settings.denoise)
 

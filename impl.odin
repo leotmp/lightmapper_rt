@@ -81,6 +81,7 @@ bake_begin_impl :: proc(ctx: ^Context, lightmap_size: [2]i32, samples: u32, ligh
         instance = {
             mesh_idx = instances[i].mesh_handle.idx,
             albedo_tex_id = instances[i].albedo_tex_id,
+            albedo = instances[i].albedo,
         }
     }
     bake.scene_gpu.instances = gpu.mem_alloc(Instance_Shader, len(instances), gpu.Memory.GPU)
@@ -251,6 +252,7 @@ Instance_Shader :: struct
 {
     mesh_idx: u32,
     albedo_tex_id: u32,
+    albedo: [4]f32,
 }
 
 Mesh_Shader :: struct

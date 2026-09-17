@@ -202,7 +202,7 @@ Instance :: struct
 
     // Material properties
     albedo_tex_id: u32,
-    albedo: [3]f32,
+    albedo: [4]f32,
 }
 
 Chart :: struct

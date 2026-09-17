@@ -199,7 +199,7 @@ main :: proc()
                 lm_chart_base = instance.lm_chart_base,
 
                 albedo_tex_id = gltf_mesh.base_color_map,
-                albedo = { 1.0, 1.0, 1.0 },
+                albedo = instance.base_color,
             }
         }
         lm_charts := make([]lm.Chart, len(gltf_scene.lm_charts), allocator = context.temp_allocator)
@@ -346,7 +346,7 @@ main :: proc()
                     lm_uvs_offset = 0,
                     lm_uvs_scale = { 1.0, 1.0 },
                     albedo_tex_id = gltf_mesh.base_color_map,
-                    albedo = { 1.0, 1.0, 1.0 },
+                    albedo = instance.base_color,
                 }
                 lm_charts := make([]lm.Chart, len(gltf_scene.lm_charts), allocator = context.temp_allocator)
                 for &lm_chart, i in lm_charts
