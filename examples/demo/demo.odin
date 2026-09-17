@@ -134,17 +134,9 @@ main :: proc()
     ensure(err_r == nil)
     defer delete(glb_contents)
 
-    gltf_scene, texture_infos, gltf_data, lm_size := shared.load_scene_gltf(glb_contents, magenta_texture_id, white_texture_id, skip_lightmap, LM_TARGET_SIZE, &desc_pool)
+    gltf_scene, lm_size := shared.load_scene_gltf(glb_contents, magenta_texture_id, white_texture_id, skip_lightmap, LM_TARGET_SIZE, &desc_pool)
     defer {
         shared.destroy_scene(&gltf_scene)
-        gltf2.unload(gltf_data)
-    }
-    defer {
-        // Clean up loaded textures
-        sync.guard(&shared.mutex)
-        for &tex in shared.loaded_textures {
-            gpu.texture_free_and_destroy(&tex)
-        }
     }
 
     lm_ctx: lm.Context

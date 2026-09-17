@@ -93,6 +93,13 @@ destroy_scene :: proc(scene: ^Scene) {
     delete(scene.meshes)
     delete(scene.instances)
     delete(scene.lm_charts)
+
+    // Clean up loaded textures
+    gpu.wait_idle()
+    sync.guard(&mutex)
+    for &tex in loaded_textures {
+        gpu.texture_free_and_destroy(&tex)
+    }
     scene^ = {}
 }
 
@@ -588,8 +595,6 @@ load_scene_gltf :: proc(
     desc_pool: ^gpu.Descriptor_Pool,
 ) -> (
     Scene,
-    []Gltf_Texture_Info,
-    ^gltf2.Data,
     [2]i32
 ) {
     options := gltf2.Options{}
@@ -602,13 +607,14 @@ load_scene_gltf :: proc(
     case gltf2.GLTF_Error:
         log.error(err)
     }
-    // Note: data is returned to caller, who should call gltf2.unload(data) when done
+    defer gltf2.unload(data)
 
     upload_sem = gpu.semaphore_create()
     defer gpu.semaphore_destroy(upload_sem)
     defer gpu.wait_idle()
 
     texture_infos: [dynamic]Gltf_Texture_Info
+    defer delete(texture_infos)
 
     log.infof("Collecting texture info from %v textures in GLTF", len(data.textures))
 
@@ -919,7 +925,7 @@ load_scene_gltf :: proc(
         }
     }
 
-    return scene, texture_infos[:], data, lm_size
+    return scene, lm_size
 }
 
 load_texture_from_gltf :: proc(
