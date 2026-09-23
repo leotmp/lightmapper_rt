@@ -175,36 +175,7 @@ main :: proc()
     bake: lm.Bake
     if !skip_lightmap
     {
-        lm_instances := make([]lm.Instance, len(gltf_scene.instances), allocator = context.temp_allocator)
-        for &lm_instance, i in lm_instances
-        {
-            instance := gltf_scene.instances[i]
-            mesh := scene.meshes[gltf_scene.instances[i].mesh_idx]
-            gltf_mesh := gltf_scene.meshes[gltf_scene.instances[i].mesh_idx]
-            lm_instance = lm.Instance {
-                mesh_handle = mesh.lm_mesh_handle,
-                lm_uvs_handle = mesh.lm_uv_handle,
-                transform = instance.transform,
-                lm_uvs_offset = 0,
-                lm_uvs_scale = { 1.0, 1.0 },
-
-                lm_chart_base = instance.lm_chart_base,
-
-                albedo_tex_id = gltf_mesh.base_color_map,
-                albedo = instance.base_color,
-            }
-        }
-        lm_charts := make([]lm.Chart, len(gltf_scene.lm_charts), allocator = context.temp_allocator)
-        for &lm_chart, i in lm_charts
-        {
-            chart := gltf_scene.lm_charts[i]
-            lm_chart = lm.Chart {
-                x = chart.x,
-                y = chart.y,
-                offset = chart.offset,
-            }
-        }
-        bake = lm.bake_begin(&lm_ctx, lm_size, 3000, lightmap, lm_instances, lm_charts, ui.lights)
+        bake = lm.bake_begin(&lm_ctx, lm_size, lightmap, 3000)
     }
     defer if !skip_lightmap do lm.bake_destroy(&bake)
 
@@ -239,6 +210,8 @@ main :: proc()
     defer gpu.semaphore_destroy(frame_sem)
     for true
     {
+        first_frame := next_frame == 1
+
         proceed := handle_window_events(window)
         if !proceed do break
 
@@ -325,20 +298,23 @@ main :: proc()
 
         if !skip_lightmap
         {
-            lm_instances := make([]lm.Instance, len(gltf_scene.instances), allocator = context.temp_allocator)
-            for &lm_instance, i in lm_instances
+            if first_frame || ui.changed_scene
             {
-                instance := gltf_scene.instances[i]
-                mesh := scene.meshes[gltf_scene.instances[i].mesh_idx]
-                gltf_mesh := gltf_scene.meshes[gltf_scene.instances[i].mesh_idx]
-                lm_instance = lm.Instance {
-                    mesh_handle = mesh.lm_mesh_handle,
-                    lm_uvs_handle = mesh.lm_uv_handle,
-                    transform = instance.transform,
-                    lm_uvs_offset = 0,
-                    lm_uvs_scale = { 1.0, 1.0 },
-                    albedo_tex_id = gltf_mesh.base_color_map,
-                    albedo = instance.base_color,
+                lm_instances := make([]lm.Instance, len(gltf_scene.instances), allocator = context.temp_allocator)
+                for &lm_instance, i in lm_instances
+                {
+                    instance := gltf_scene.instances[i]
+                    mesh := scene.meshes[gltf_scene.instances[i].mesh_idx]
+                    gltf_mesh := gltf_scene.meshes[gltf_scene.instances[i].mesh_idx]
+                    lm_instance = lm.Instance {
+                        mesh_handle = mesh.lm_mesh_handle,
+                        lm_uvs_handle = mesh.lm_uv_handle,
+                        transform = instance.transform,
+                        lm_uvs_offset = 0,
+                        lm_uvs_scale = { 1.0, 1.0 },
+                        albedo_tex_id = gltf_mesh.base_color_map,
+                        albedo = instance.base_color,
+                    }
                 }
                 lm_charts := make([]lm.Chart, len(gltf_scene.lm_charts), allocator = context.temp_allocator)
                 for &lm_chart, i in lm_charts
@@ -350,12 +326,18 @@ main :: proc()
                         offset = chart.offset,
                     }
                 }
+                lm.bake_submit_scene(&bake, frame_arena, lm_instances, lm_charts)
             }
-            if ui.do_reset_bake {
+            if first_frame || ui.changed_lights
+            {
+                lm.bake_submit_lights(&bake, frame_arena, ui.lights)
+            }
+            if ui.changed_scene || ui.changed_lights || ui.do_reset_bake
+            {
                 lm.bake_reset(&bake)
                 pathtrace_gt_counter = 0
             }
-            lm.bake_iteration(&bake, frame_arena, lm_instances, ui.lights, ui.fix_seams, ui.denoise)
+            lm.bake_iteration(&bake, frame_arena, ui.fix_seams, ui.denoise)
         }
 
         switch ui.output_type
@@ -1305,6 +1287,8 @@ UI_State :: struct
     lights: lm.Lights,
 
     do_reset_bake: bool,
+    changed_scene: bool,
+    changed_lights: bool,
     denoise: bool,
 }
 
@@ -1420,24 +1404,24 @@ ui_update :: proc(ui: ^UI_State, scene: ^shared.Scene, debug_viz_draw_calls: []U
 
             imgui.separator_text("Scene settings (require bake reset)")
             {
-                ui.do_reset_bake = false
+                ui.changed_lights = false
 
                 imgui.push_item_width(SETTINGS_WIDTH / 2)
-                ui.do_reset_bake |= imgui.drag_float("###azimuth", &ui.light_azimuth, 0.5, -180, 180)
+                ui.changed_lights |= imgui.drag_float("###azimuth", &ui.light_azimuth, 0.5, -180, 180)
                 imgui.same_line()
-                ui.do_reset_bake |= imgui.drag_float("Sun Angle", &ui.light_elevation, 0.5, -90, 90)
+                ui.changed_lights |= imgui.drag_float("Sun Angle", &ui.light_elevation, 0.5, -90, 90)
                 ui.lights.sun_dir = dir_from_spherical_coords(math.RAD_PER_DEG * ui.light_azimuth, math.RAD_PER_DEG * ui.light_elevation)
                 imgui.pop_item_width()
 
-                ui.do_reset_bake |= imgui.drag_float("Sun Radius (degrees)", &ui.light_radius_deg, 0.01, 0.0000001)
+                ui.changed_lights |= imgui.drag_float("Sun Radius (degrees)", &ui.light_radius_deg, 0.01, 0.0000001)
                 ui.lights.sun_radius = math.RAD_PER_DEG * ui.light_radius_deg
 
                 imgui.push_item_width(SETTINGS_WIDTH / 3)
-                ui.do_reset_bake |= imgui.drag_float("###emission_x", &ui.lights.sun_emission.x, 1)
+                ui.changed_lights |= imgui.drag_float("###emission_x", &ui.lights.sun_emission.x, 1)
                 imgui.same_line()
-                ui.do_reset_bake |= imgui.drag_float("###emission_y", &ui.lights.sun_emission.y, 1)
+                ui.changed_lights |= imgui.drag_float("###emission_y", &ui.lights.sun_emission.y, 1)
                 imgui.same_line()
-                ui.do_reset_bake |= imgui.drag_float("Sun Emission", &ui.lights.sun_emission.z, 1)
+                ui.changed_lights |= imgui.drag_float("Sun Emission", &ui.lights.sun_emission.z, 1)
                 imgui.pop_item_width()
 
                 if imgui.button("Reset Bake") do ui.do_reset_bake = true
@@ -1445,6 +1429,8 @@ ui_update :: proc(ui: ^UI_State, scene: ^shared.Scene, debug_viz_draw_calls: []U
 
             imgui.separator_text("Edit static entities")
             {
+                ui.changed_scene = false
+
                 @(static) cube_positions: [2][3]f32
                 @(static) cube_rotations: [2][3]f32
                 @(static) cube_scales := [2][3]f32{
@@ -1464,12 +1450,14 @@ ui_update :: proc(ui: ^UI_State, scene: ^shared.Scene, debug_viz_draw_calls: []U
                     if changed
                     {
                         instance.transform = shared.xform_to_mat(cube_positions[cube_idx], 1 /* cube_rotations[cube_idx] */, cube_scales[cube_idx])
-                        ui.do_reset_bake = true
+                        ui.changed_scene = true
                     }
 
                     imgui.pop_id()
                 }
             }
+
+            ui.do_reset_bake |= ui.changed_scene || ui.changed_lights
 
             imgui.separator_text("Postprocessing settings")
             imgui.drag_float("Exposure", &ui.exposure, 0.01)

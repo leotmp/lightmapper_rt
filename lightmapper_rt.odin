@@ -217,11 +217,14 @@ Lights :: struct
     sun_dir: [3]f32,
     sun_radius: f32,       // Radians
     sun_emission: [3]f32,  // NOTE: This is total emission across the sun's surface
+    ambient_emission: [3]f32,
 }
 
-bake_begin :: proc(ctx: ^Context, lightmap_size: [2]i32, samples: u32, lightmap: gpu.Texture, instances: []Instance, charts: []Chart, lights: Lights) -> Bake
+bake_begin :: proc(ctx: ^Context, lightmap_size: [2]i32, lightmap: gpu.Texture,
+                   samples: u32 = 1000,
+                   )-> Bake
 {
-    return bake_begin_impl(ctx, lightmap_size, samples, lightmap, instances, charts, lights)
+    return bake_begin_impl(ctx, lightmap_size, lightmap, samples)
 }
 
 bake_reset :: proc(bake: ^Bake)
@@ -234,19 +237,19 @@ bake_progress :: proc(bake: ^Bake) -> f32
     return f32(bake.accum_counter) / f32(bake.max_samples) if bake.max_samples != 0 else 0
 }
 
-bake_submit_scene :: proc(bake: ^Bake, instances: []Instance)
+bake_submit_scene :: proc(bake: ^Bake, upload_arena: ^gpu.Arena, instances: []Instance, charts: []Chart)
 {
-
+    bake_submit_scene_impl(bake, upload_arena, instances, charts)
 }
 
-bake_submit_lights :: proc(bake: ^Bake, lights: Lights)
+bake_submit_lights :: proc(bake: ^Bake, upload_arena: ^gpu.Arena, lights: Lights)
 {
-
+    bake_submit_lights_impl(bake, upload_arena, lights)
 }
 
-bake_iteration :: proc(bake: ^Bake, frame_arena: ^gpu.Arena, instances: []Instance, lights: Lights, fix_seams: bool, denoise_on_preview: bool)
+bake_iteration :: proc(bake: ^Bake, frame_arena: ^gpu.Arena, fix_seams: bool, denoise_on_preview: bool)
 {
-    bake_iteration_impl(bake, frame_arena, instances, lights, fix_seams, denoise_on_preview)
+    bake_iteration_impl(bake, frame_arena, fix_seams, denoise_on_preview)
 }
 
 bake_is_done :: proc(bake: ^Bake) -> bool

@@ -29,7 +29,7 @@ lm_instances := /* Convert your scene into []lm.Instance */
 
 // You can have multiple bake instances for different parts of your scene.
 // Each bake instance will have a separate lightmap texture associated to it.
-bake := lm.bake_begin(&lm_ctx, LM_SIZE, 3000, lightmap)
+bake := lm.bake_begin(&lm_ctx, /* lightmap_res */, /* total_num_samples */, lightmap)
 defer lm.bake_destroy(&bake)
 
 // --- Main loop
