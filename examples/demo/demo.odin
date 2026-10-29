@@ -119,16 +119,16 @@ main :: proc()
         gpu.mem_free(fsq_indices)
     }
 
-    desc_pool := gpu.desc_pool_create()
-    defer gpu.desc_pool_destroy(&desc_pool)
+    desc_pool := gpu.descriptor_pool_create()
+    defer gpu.descriptor_pool_destroy(&desc_pool)
 
     magenta_texture := create_magenta_texture(&upload_arena, upload_cmd_buf)
     defer gpu.texture_free_and_destroy(&magenta_texture)
-    magenta_texture_id := gpu.desc_pool_alloc_texture(&desc_pool, gpu.texture_view_descriptor(magenta_texture, {}))
+    magenta_texture_id := gpu.descriptor_pool_alloc_texture(&desc_pool, gpu.texture_view_descriptor(magenta_texture, {}))
 
     white_texture := create_white_texture(&upload_arena, upload_cmd_buf)
     defer gpu.texture_free_and_destroy(&white_texture)
-    white_texture_id := gpu.desc_pool_alloc_texture(&desc_pool, gpu.texture_view_descriptor(white_texture, {}))
+    white_texture_id := gpu.descriptor_pool_alloc_texture(&desc_pool, gpu.texture_view_descriptor(white_texture, {}))
 
     glb_contents, err_r := os.read_entire_file_from_path(glb_path, allocator = context.allocator)
     ensure(err_r == nil)
@@ -148,10 +148,10 @@ main :: proc()
 
     anisotropy := min(16.0, gpu.device_limits().max_anisotropy)
 
-    sampler_linear_id := gpu.desc_pool_alloc_sampler(&desc_pool, gpu.sampler_descriptor({ max_anisotropy = anisotropy }))
+    sampler_linear_id := gpu.descriptor_pool_alloc_sampler(&desc_pool, gpu.sampler_descriptor({ max_anisotropy = anisotropy }))
     // Lightmap samplers
-    lm_sampler_linear_id  := gpu.desc_pool_alloc_sampler(&desc_pool, gpu.sampler_descriptor({}))
-    lm_sampler_point_id   := gpu.desc_pool_alloc_sampler(&desc_pool, gpu.sampler_descriptor({ min_filter = .Nearest, mag_filter = .Nearest, mip_filter = .Nearest }))
+    lm_sampler_linear_id  := gpu.descriptor_pool_alloc_sampler(&desc_pool, gpu.sampler_descriptor({}))
+    lm_sampler_point_id   := gpu.descriptor_pool_alloc_sampler(&desc_pool, gpu.sampler_descriptor({ min_filter = .Nearest, mag_filter = .Nearest, mip_filter = .Nearest }))
 
     color_target, postprocess_target, depth_target := create_target_textures(u32(window_size_x), u32(window_size_y), &desc_pool)
     defer {
@@ -186,9 +186,9 @@ main :: proc()
         gbuf_world_normals_tex = magenta_texture
     }
 
-    gbuf_world_pos_id := gpu.desc_pool_alloc_texture(&desc_pool, gpu.texture_view_descriptor(gbuf_world_pos_tex, {}))
-    gbuf_world_normals_id := gpu.desc_pool_alloc_texture(&desc_pool, gpu.texture_view_descriptor(gbuf_world_normals_tex, {}))
-    lightmap_id := gpu.desc_pool_alloc_texture(&desc_pool, gpu.texture_view_descriptor(lightmap, {}))
+    gbuf_world_pos_id := gpu.descriptor_pool_alloc_texture(&desc_pool, gpu.texture_view_descriptor(gbuf_world_pos_tex, {}))
+    gbuf_world_normals_id := gpu.descriptor_pool_alloc_texture(&desc_pool, gpu.texture_view_descriptor(gbuf_world_normals_tex, {}))
+    lightmap_id := gpu.descriptor_pool_alloc_texture(&desc_pool, gpu.texture_view_descriptor(lightmap, {}))
 
     imgui_ctx := init_dear_imgui(window, &desc_pool)
     defer {
@@ -210,8 +210,6 @@ main :: proc()
     defer gpu.semaphore_destroy(frame_sem)
     for true
     {
-        first_frame := next_frame == 1
-
         proceed := handle_window_events(window)
         if !proceed do break
 
@@ -298,7 +296,7 @@ main :: proc()
 
         if !skip_lightmap
         {
-            if first_frame || ui.changed_scene
+            if !bake.has_scene || ui.changed_scene
             {
                 lm_instances := make([]lm.Instance, len(gltf_scene.instances), allocator = context.temp_allocator)
                 for &lm_instance, i in lm_instances
@@ -314,6 +312,7 @@ main :: proc()
                         lm_uvs_scale = { 1.0, 1.0 },
                         albedo_tex_id = gltf_mesh.base_color_map,
                         albedo = instance.base_color,
+                        lm_chart_base = instance.lm_chart_base,
                     }
                 }
                 lm_charts := make([]lm.Chart, len(gltf_scene.lm_charts), allocator = context.temp_allocator)
@@ -326,11 +325,11 @@ main :: proc()
                         offset = chart.offset,
                     }
                 }
-                lm.bake_submit_scene(&bake, frame_arena, lm_instances, lm_charts)
+                lm.bake_submit_scene(&bake, &upload_arena, lm_instances, lm_charts)
             }
-            if first_frame || ui.changed_lights
+            if !bake.has_lights || ui.changed_lights
             {
-                lm.bake_submit_lights(&bake, frame_arena, ui.lights)
+                lm.bake_submit_lights(&bake, &upload_arena, ui.lights)
             }
             if ui.changed_scene || ui.changed_lights || ui.do_reset_bake
             {
@@ -662,7 +661,7 @@ create_target_textures :: proc(window_size_x: u32, window_size_y: u32, desc_pool
 {
     // Color
     {
-        color_target = gpu.texture_alloc_and_create(gpu.Texture_Desc {
+        color_target = gpu.texture_alloc_and_create(gpu.Texture_Info {
             dimensions   = { u32(window_size_x), u32(window_size_y), 1 },
             format       = .RGBA16_Float,
             mip_count    = 1,
@@ -670,9 +669,9 @@ create_target_textures :: proc(window_size_x: u32, window_size_y: u32, desc_pool
             sample_count = 4,
             usage        = { .Color_Attachment, .Sampled },
         })
-        COLOR_TARGET_IDX = gpu.desc_pool_alloc_texture(desc_pool, gpu.texture_view_descriptor(color_target, {}))
+        COLOR_TARGET_IDX = gpu.descriptor_pool_alloc_texture(desc_pool, gpu.texture_view_descriptor(color_target, {}))
 
-        postprocess_target = gpu.texture_alloc_and_create(gpu.Texture_Desc {
+        postprocess_target = gpu.texture_alloc_and_create(gpu.Texture_Info {
             dimensions   = { u32(window_size_x), u32(window_size_y), 1 },
             format       = .RGBA16_Float,
             mip_count    = 1,
@@ -680,13 +679,13 @@ create_target_textures :: proc(window_size_x: u32, window_size_y: u32, desc_pool
             sample_count = 1,
             usage        = { .Color_Attachment, .Sampled, .Storage },
         })
-        POSTPROCESS_TARGET_IDX = gpu.desc_pool_alloc_texture(desc_pool, gpu.texture_view_descriptor(postprocess_target, {}))
-        POSTPROCESS_TARGET_RW_IDX = gpu.desc_pool_alloc_texture_rw(desc_pool, gpu.texture_rw_view_descriptor(postprocess_target, {}))
+        POSTPROCESS_TARGET_IDX = gpu.descriptor_pool_alloc_texture(desc_pool, gpu.texture_view_descriptor(postprocess_target, {}))
+        POSTPROCESS_TARGET_RW_IDX = gpu.descriptor_pool_alloc_texture_rw(desc_pool, gpu.texture_rw_view_descriptor(postprocess_target, {}))
     }
 
     // Depth
     {
-        depth_target = gpu.texture_alloc_and_create(gpu.Texture_Desc {
+        depth_target = gpu.texture_alloc_and_create(gpu.Texture_Info {
             dimensions   = { u32(window_size_x), u32(window_size_y), 1 },
             format       = .D32_Float,
             mip_count    = 1,
@@ -1316,6 +1315,8 @@ make_ui_default :: proc() -> UI_State
 
 ui_update :: proc(ui: ^UI_State, scene: ^shared.Scene, debug_viz_draw_calls: []UV_Mesh_Draw_Call, texture_ids: []u32, texture_names: []cstring, bake_progress: f32, skip_lightmap: bool, lm_size: [2]i32)
 {
+    ui.do_reset_bake = false
+
     if imgui.begin_main_menu_bar()
     {
         if imgui.begin_menu("Windows")
@@ -1538,31 +1539,4 @@ create_white_texture :: proc(upload_arena: ^gpu.Arena, cmd_buf: gpu.Command_Buff
     )
     gpu.cmd_copy_to_texture(cmd_buf, texture, staging)
     return texture
-}
-
-decompose_transform :: proc(m: matrix[4, 4]f32) -> (position, rotation, scale: [3]f32) {
-    position = {m[3, 0], m[3, 1], m[3, 2]}
-
-    x := [3]f32{m[0, 0], m[0, 1], m[0, 2]}
-    y := [3]f32{m[1, 0], m[1, 1], m[1, 2]}
-    z := [3]f32{m[2, 0], m[2, 1], m[2, 2]}
-
-    scale = {linalg.length(x), linalg.length(y), linalg.length(z)}
-
-    if scale.x != 0 { x /= scale.x }
-    if scale.y != 0 { y /= scale.y }
-    if scale.z != 0 { z /= scale.z }
-
-    rotation.y = math.asin(clamp(-x.z, -1, 1))
-    if abs(math.cos(rotation.y)) > 0.0001 {
-        rotation.x = math.atan2(y.z, z.z)
-        rotation.z = math.atan2(x.y, x.x)
-    } else {
-        rotation.x = math.atan2(-z.y, y.y)
-        rotation.z = 0
-    }
-
-    rotation *= 180.0 / math.PI
-
-    return
 }

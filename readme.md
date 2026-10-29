@@ -17,6 +17,24 @@ ok := gpu.init()
 ensure(ok)
 defer gpu.cleanup()
 
+// --- Initialize lightmapper context
+lm_ctx := lm.init(&lm_ctx, &desc_pool)
+defer lm.cleanup(&lm_ctx)
+
+// --- Upload meshes to the GPU
+for &mesh in scene.meshes
+{
+    // Custom code to upload mesh...
+
+    mesh.lm_handle = lm.add_mesh(lm_ctx, cmd_buf, lm.MeshDesc {
+        positions_gpu    = /* ... */,
+        normals_gpu      = /* ... */,
+        uvs_gpu          = /* ... */,
+        indices_gpu      = /* ... */,
+        lm_chart_indices = /* ... */,
+    })
+}
+
 // --- Create the lightmap texture
 lightmap := gpu.texture_alloc_and_create({
     format = .RGBA16_Float,
@@ -65,3 +83,8 @@ TODO:
 - Add options (rays per pixel, denoise tile size)
 - Fix denoise things
 - Find/make some nice scenes for social media points
+
+LATER:
+- Add support for texture array for big lightmaps.
+- Add point lights and other types of light sources
+- Seam smoothing

@@ -32,32 +32,28 @@ bake_begin_impl :: proc(ctx: ^Context, lightmap_size: [2]i32, lightmap: gpu.Text
 
     bake: Bake
     bake.ctx = ctx
-    /*
     bake.gbufs = gbufs_create(lightmap_size)
-    bake.instances = slice.clone_to_dynamic(instances)
-    bake.lights = lights
-    */
     bake.lightmap_size = lightmap_size
     bake.lightmap = lightmap
     bake.max_samples = samples
 
-    bake.lightmap_rw_id = gpu.desc_pool_alloc_texture_rw(ctx.desc_pool, gpu.texture_rw_view_descriptor(lightmap, {}))
-    bake.lightmap_id = gpu.desc_pool_alloc_texture(ctx.desc_pool, gpu.texture_view_descriptor(bake.lightmap, {}))
+    bake.lightmap_rw_id = gpu.descriptor_pool_alloc_texture_rw(ctx.desc_pool, gpu.texture_rw_view_descriptor(lightmap, {}))
+    bake.lightmap_id = gpu.descriptor_pool_alloc_texture(ctx.desc_pool, gpu.texture_view_descriptor(bake.lightmap, {}))
 
     bake.pathtrace_output = gpu.texture_alloc_and_create({
         format = .RGBA16_Float,
         dimensions = { u32(lightmap_size.x), u32(lightmap_size.y), 1 },
         usage = { .Sampled, .Storage, .Transfer_Src, .Color_Attachment }
     })
-    bake.pathtrace_output_rw_id = gpu.desc_pool_alloc_texture_rw(ctx.desc_pool, gpu.texture_rw_view_descriptor(bake.pathtrace_output, {}))
+    bake.pathtrace_output_rw_id = gpu.descriptor_pool_alloc_texture_rw(ctx.desc_pool, gpu.texture_rw_view_descriptor(bake.pathtrace_output, {}))
 
     bake.tmp_tex = gpu.texture_alloc_and_create({
         format = .RGBA16_Float,
         dimensions = { u32(lightmap_size.x), u32(lightmap_size.y), 1 },
         usage = { .Sampled, .Storage, .Transfer_Src, .Color_Attachment }
     })
-    bake.tmp_tex_id = gpu.desc_pool_alloc_texture(ctx.desc_pool, gpu.texture_view_descriptor(bake.tmp_tex, {}))
-    bake.tmp_tex_rw_id = gpu.desc_pool_alloc_texture_rw(ctx.desc_pool, gpu.texture_rw_view_descriptor(bake.tmp_tex, {}))
+    bake.tmp_tex_id = gpu.descriptor_pool_alloc_texture(ctx.desc_pool, gpu.texture_view_descriptor(bake.tmp_tex, {}))
+    bake.tmp_tex_rw_id = gpu.descriptor_pool_alloc_texture_rw(ctx.desc_pool, gpu.texture_rw_view_descriptor(bake.tmp_tex, {}))
 
     bake.shared_buf_vk = create_vk_external_buffer_for_oidn(u32(lightmap_size.x * lightmap_size.y * 2 * 4))  // TODO: What about other formats?
     bake.shared_buf_oidn = oidn_shared_buffer_from_vk_buffer(ctx.oidn_device, bake.shared_buf_vk)
@@ -72,6 +68,13 @@ bake_iteration_impl :: proc(bake: ^Bake, frame_arena: ^gpu.Arena, fix_seams: boo
 {
     ensure(bake.has_scene,  "Scene not submitted for this bake!")
     ensure(bake.has_lights, "Lights not submitted for this bake!")
+
+    if sync.guard(&bake.ctx.mutex) && bake.ctx.meshes_gpu_is_stale
+    {
+        cmd_buf := gpu.commands_begin(.Main)
+        repopulate_meshes_gpu(bake.ctx, frame_arena, cmd_buf)
+        gpu.queue_submit(.Main, {cmd_buf})
+    }
 
     if !fix_seams && bake.accum_counter >= bake.max_samples do return
 
@@ -140,26 +143,31 @@ bake_iteration_impl :: proc(bake: ^Bake, frame_arena: ^gpu.Arena, fix_seams: boo
     }
 }
 
-bake_submit_scene_impl :: proc(bake: ^Bake, upload_arena: ^gpu.Arena, instances: []Instance, charts: []Chart)
+bake_submit_scene_impl :: proc(bake: ^Bake, staging_arena: ^gpu.Arena, instances: []Instance, charts: []Chart)
 {
     ctx := bake.ctx
+    instance_count := u32(len(instances))
+    can_update_tlas := bake.has_scene && gpu.slice_len(bake.scene_gpu.instances_bvh) == i64(instance_count)
+    if can_update_tlas do fmt.println("can update tlas")
+
+    if bake.has_scene {
+        gpu.queue_wait_idle(.Main)
+        if can_update_tlas {
+            gpu.mem_free(bake.scene_gpu.instances)
+            gpu.mem_free(bake.scene_gpu.instances_bvh)
+            bake.scene_gpu.instances = {}
+            bake.scene_gpu.instances_bvh = {}
+        } else {
+            gpu.descriptor_pool_free_bvhs(ctx.desc_pool, bake.scene_gpu.bvh_id)
+            gpu.descriptor_pool_free_textures_rw(ctx.desc_pool, bake.gbufs_id)
+            scene_destroy(&bake.scene_gpu)
+            bake.gbufs_id = 0
+        }
+    }
 
     cmd_buf := gpu.commands_begin(.Main)
 
-    // Should be a global thing
-    /*
-    meshes_gpu := gpu.arena_alloc(upload_arena, Mesh_Shader, len(ctx.meshes.resources))
-    for &mesh, i in meshes_gpu.cpu {
-        mesh.positions = ctx.meshes.resources[i].info.positions.gpu.ptr
-        mesh.normals   = ctx.meshes.resources[i].info.normals.gpu.ptr
-        mesh.uvs       = ctx.meshes.resources[i].info.uvs.gpu.ptr
-        mesh.indices   = ctx.meshes.resources[i].info.indices.gpu.ptr
-    }
-    bake.scene_gpu.meshes_shader = gpu.mem_alloc(Mesh_Shader, len(ctx.meshes.resources), gpu.Memory.GPU)
-    gpu.cmd_mem_copy(cmd_buf, bake.scene_gpu.meshes_shader, meshes_gpu)
-    */
-
-    instances_gpu := gpu.arena_alloc(upload_arena, Instance_Shader, len(instances))
+    instances_gpu := gpu.arena_alloc(staging_arena, Instance_Shader, len(instances))
     for &instance, i in instances_gpu.cpu {
         instance = {
             mesh_idx = instances[i].mesh_handle.idx,
@@ -171,32 +179,37 @@ bake_submit_scene_impl :: proc(bake: ^Bake, upload_arena: ^gpu.Arena, instances:
     gpu.cmd_mem_copy(cmd_buf, bake.scene_gpu.instances, instances_gpu)
     gpu.cmd_barrier(cmd_buf, .All, .All)
 
-    bake.scene_gpu.instances_bvh = upload_bvh_instances(upload_arena, cmd_buf, instances, ctx.meshes.resources[:])
+    bake.scene_gpu.instances_bvh = upload_bvh_instances(staging_arena, cmd_buf, instances, ctx.meshes.resources[:])
     gpu.cmd_barrier(cmd_buf, .Transfer, .Build_BVH)
-    bake.scene_gpu.bvh = build_tlas(&ctx.upload_arena, cmd_buf, bake.scene_gpu.instances_bvh, u32(len(instances)))
+
+    if can_update_tlas {
+        update_tlas(staging_arena, cmd_buf, bake.scene_gpu.bvh, bake.scene_gpu.instances_bvh, instance_count)
+    } else {
+        bake.scene_gpu.bvh = build_tlas(staging_arena, cmd_buf, bake.scene_gpu.instances_bvh, instance_count)
+        bake.scene_gpu.bvh_id = gpu.descriptor_pool_alloc_bvh(ctx.desc_pool, bake.scene_gpu.bvh)
+    }
     gpu.cmd_barrier(cmd_buf, .Build_BVH, .All)
 
-    bake.scene_gpu.bvh_id = gpu.desc_pool_alloc_bvh(ctx.desc_pool, bake.scene_gpu.bvh)
-
     resolution := [2]f32 { f32(bake.lightmap_size.x), f32(bake.lightmap_size.y) }
-    gbufs_render(cmd_buf, &ctx.upload_arena, &bake.gbufs, ctx.shaders, instances, charts, ctx.meshes.resources[:], ctx.lm_uvs.resources[:], resolution)
+    gbufs_render(cmd_buf, staging_arena, &bake.gbufs, ctx.shaders, instances, charts, ctx.meshes.resources[:], ctx.lm_uvs.resources[:], resolution)
     gpu.cmd_barrier(cmd_buf, .All, .All, {})
 
-    bake.gbufs_id = gpu.desc_pool_alloc_textures_rw(ctx.desc_pool, []gpu.Texture_Descriptor {
-        gpu.texture_rw_view_descriptor(bake.gbufs.world_pos, {}),
-        gpu.texture_rw_view_descriptor(bake.gbufs.world_normals, {}),
-    })
+    if !can_update_tlas {
+        bake.gbufs_id = gpu.descriptor_pool_alloc_textures_rw(ctx.desc_pool, []gpu.Texture_Descriptor {
+            gpu.texture_rw_view_descriptor(bake.gbufs.world_pos, {}),
+            gpu.texture_rw_view_descriptor(bake.gbufs.world_normals, {}),
+        })
+    }
 
     gpu.queue_submit(.Main, { cmd_buf })
 
     bake.has_scene = true
 }
 
-bake_submit_lights_impl :: proc(bake: ^Bake, upload_arena: ^gpu.Arena, lights: Lights)
+bake_submit_lights_impl :: proc(bake: ^Bake, staging_arena: ^gpu.Arena, lights: Lights)
 {
-
-
-    // bake.has_lights = true
+    bake.lights = lights
+    bake.has_lights = true
 }
 
 LM_UVs :: struct
@@ -225,7 +238,6 @@ Scene_GPU :: struct #all_or_none
 
     // Shader view
     instances: gpu.slice_t(Instance_Shader),
-    meshes_shader: gpu.slice_t(Mesh_Shader),
 }
 
 scene_destroy :: proc(scene: ^Scene_GPU)
@@ -233,7 +245,6 @@ scene_destroy :: proc(scene: ^Scene_GPU)
     gpu.bvh_free_and_destroy(&scene.bvh)
     gpu.mem_free(scene.instances_bvh)
     gpu.mem_free(scene.instances)
-    gpu.mem_free(scene.meshes_shader)
     scene^ = {}
 }
 
@@ -426,7 +437,7 @@ pathtrace :: proc(bake: ^Bake, cmd_buf: gpu.Command_Buffer, frame_arena: ^gpu.Ar
         linear_sampler = bake.ctx.linear_sampler_id,
         scene = {
             instances = bake.scene_gpu.instances.gpu.ptr,
-            meshes = bake.scene_gpu.meshes_shader.gpu.ptr,
+            meshes = bake.ctx.meshes_gpu.gpu.ptr,
             lights = {
                 dir_light_dir   = lights.sun_dir,
                 dir_light_angle = lights.sun_radius,
@@ -456,10 +467,10 @@ build_blas :: proc(bvh_scratch_arena: ^gpu.Arena, cmd_buf: gpu.Command_Buffer, p
 {
     assert(idx_count % 3 == 0)
 
-    desc := gpu.BLAS_Desc {
+    desc := gpu.BLAS_Info {
         hint = .Prefer_Fast_Trace,
         shapes = {
-            gpu.BVH_Mesh_Desc {
+            gpu.BVH_Mesh_Info {
                 vertex_stride = size_of(positions.cpu[0]),
                 max_vertex = vert_count - 1,
                 tri_count = idx_count / 3,
@@ -474,14 +485,26 @@ build_blas :: proc(bvh_scratch_arena: ^gpu.Arena, cmd_buf: gpu.Command_Buffer, p
 
 build_tlas :: proc(bvh_scratch_arena: ^gpu.Arena, cmd_buf: gpu.Command_Buffer, instances: gpu.gpuptr, instance_count: u32) -> gpu.Owned_BVH
 {
-    desc := gpu.TLAS_Desc {
+    info := gpu.TLAS_Info {
         hint = .Prefer_Fast_Trace,
-        instance_count = instance_count
+        caps = { .Update },
+        instance_count = instance_count,
     }
-    bvh := gpu.bvh_alloc_and_create(desc)
-    scratch := gpu.bvh_alloc_build_scratch_buffer(bvh_scratch_arena, desc)
+    bvh := gpu.bvh_alloc_and_create(info)
+    scratch := gpu.bvh_alloc_build_scratch_buffer(bvh_scratch_arena, info)
     gpu.cmd_build_tlas(cmd_buf, bvh, scratch, instances)
     return bvh
+}
+
+update_tlas :: proc(bvh_scratch_arena: ^gpu.Arena, cmd_buf: gpu.Command_Buffer, bvh: gpu.BVH, instances: gpu.gpuptr, instance_count: u32)
+{
+    info := gpu.TLAS_Info {
+        hint = .Prefer_Fast_Trace,
+        caps = { .Update },
+        instance_count = instance_count,
+    }
+    scratch := gpu.bvh_alloc_update_scratch_buffer(bvh_scratch_arena, info)
+    gpu.cmd_update_tlas(cmd_buf, bvh, scratch, instances)
 }
 
 upload_bvh_instances :: proc(upload_arena: ^gpu.Arena, cmd_buf: gpu.Command_Buffer, instances: []Instance, meshes: []Resource(Mesh)) -> gpu.slice_t(gpu.BVH_Instance)
@@ -1268,4 +1291,32 @@ pool_destroy :: proc(pool: ^Resource_Pool($Handle_T, $Info_T))
     pool.resources = {}
     pool.freelist = nil
     pool.init = false
+}
+
+repopulate_meshes_gpu :: proc(ctx: ^Context, staging: ^gpu.Arena, cmd_buf: gpu.Command_Buffer)
+{
+    meshes_staging := gpu.arena_alloc(staging, Mesh_Shader, MAX_MESHES)
+
+    for i in 1..<len(ctx.meshes.resources)
+    {
+        el := intr.volatile_load(&ctx.meshes.resources[i])
+        if el.alive
+        {
+            mesh := ctx.meshes.resources[i].info
+            meshes_staging.cpu[i] = Mesh_Shader {
+                positions = mesh.positions.gpu.ptr,
+                normals = mesh.normals.gpu.ptr,
+                uvs = mesh.uvs.gpu.ptr,
+                indices = mesh.indices.gpu.ptr,
+            }
+        }
+        else
+        {
+            meshes_staging.cpu[i] = {}
+        }
+    }
+
+    gpu.cmd_mem_copy(cmd_buf, ctx.meshes_gpu, meshes_staging)
+    gpu.cmd_barrier(cmd_buf, .All, .All)
+    ctx.meshes_gpu_is_stale = true
 }

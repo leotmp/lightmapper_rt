@@ -115,16 +115,16 @@ main :: proc()
         gpu.mem_free(fsq_indices)
     }
 
-    desc_pool := gpu.desc_pool_create()
-    defer gpu.desc_pool_destroy(&desc_pool)
+    desc_pool := gpu.descriptor_pool_create()
+    defer gpu.descriptor_pool_destroy(&desc_pool)
 
     magenta_texture := create_magenta_texture(&upload_arena, upload_cmd_buf)
     defer gpu.texture_free_and_destroy(&magenta_texture)
-    magenta_texture_id := gpu.desc_pool_alloc_texture(&desc_pool, gpu.texture_view_descriptor(magenta_texture, {}))
+    magenta_texture_id := gpu.descriptor_pool_alloc_texture(&desc_pool, gpu.texture_view_descriptor(magenta_texture, {}))
 
     white_texture := create_white_texture(&upload_arena, upload_cmd_buf)
     defer gpu.texture_free_and_destroy(&white_texture)
-    white_texture_id := gpu.desc_pool_alloc_texture(&desc_pool, gpu.texture_view_descriptor(white_texture, {}))
+    white_texture_id := gpu.descriptor_pool_alloc_texture(&desc_pool, gpu.texture_view_descriptor(white_texture, {}))
 
     glb_contents, err_r := os.read_entire_file_from_path(glb_path, allocator = context.allocator)
     ensure(err_r == nil)
@@ -143,9 +143,9 @@ main :: proc()
     defer scene_destroy(&scene)
 
     anisotropy := min(16.0, gpu.device_limits().max_anisotropy)
-    sampler_linear_id := gpu.desc_pool_alloc_sampler(&desc_pool, gpu.sampler_descriptor({ max_anisotropy = anisotropy }))
+    sampler_linear_id := gpu.descriptor_pool_alloc_sampler(&desc_pool, gpu.sampler_descriptor({ max_anisotropy = anisotropy }))
     // Lightmap samplers
-    lm_sampler_linear_id  := gpu.desc_pool_alloc_sampler(&desc_pool, gpu.sampler_descriptor({}))
+    lm_sampler_linear_id  := gpu.descriptor_pool_alloc_sampler(&desc_pool, gpu.sampler_descriptor({}))
 
     color_target, postprocess_target, depth_target := create_target_textures(u32(window_size_x), u32(window_size_y), &desc_pool)
     defer {
@@ -198,7 +198,7 @@ main :: proc()
     bake := lm.bake_begin(&lm_ctx, lm_size, 3000, lightmap, lm_instances, lm_charts, settings.lights)
     defer lm.bake_destroy(&bake)
 
-    lightmap_id := gpu.desc_pool_alloc_texture(&desc_pool, gpu.texture_view_descriptor(lightmap, {}))
+    lightmap_id := gpu.descriptor_pool_alloc_texture(&desc_pool, gpu.texture_view_descriptor(lightmap, {}))
 
     now_ts := sdl.GetPerformanceCounter()
 
@@ -590,7 +590,7 @@ create_target_textures :: proc(window_size_x: u32, window_size_y: u32, desc_pool
             sample_count = 4,
             usage        = { .Color_Attachment, .Sampled },
         })
-        COLOR_TARGET_IDX = gpu.desc_pool_alloc_texture(desc_pool, gpu.texture_view_descriptor(color_target, {}))
+        COLOR_TARGET_IDX = gpu.descriptor_pool_alloc_texture(desc_pool, gpu.texture_view_descriptor(color_target, {}))
 
         postprocess_target = gpu.texture_alloc_and_create(gpu.Texture_Desc {
             dimensions   = { u32(window_size_x), u32(window_size_y), 1 },
@@ -600,8 +600,8 @@ create_target_textures :: proc(window_size_x: u32, window_size_y: u32, desc_pool
             sample_count = 1,
             usage        = { .Color_Attachment, .Sampled, .Storage },
         })
-        POSTPROCESS_TARGET_IDX = gpu.desc_pool_alloc_texture(desc_pool, gpu.texture_view_descriptor(postprocess_target, {}))
-        POSTPROCESS_TARGET_RW_IDX = gpu.desc_pool_alloc_texture_rw(desc_pool, gpu.texture_rw_view_descriptor(postprocess_target, {}))
+        POSTPROCESS_TARGET_IDX = gpu.descriptor_pool_alloc_texture(desc_pool, gpu.texture_view_descriptor(postprocess_target, {}))
+        POSTPROCESS_TARGET_RW_IDX = gpu.descriptor_pool_alloc_texture_rw(desc_pool, gpu.texture_rw_view_descriptor(postprocess_target, {}))
     }
 
     // Depth

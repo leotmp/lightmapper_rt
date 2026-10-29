@@ -1025,7 +1025,7 @@ load_scene_textures_from_gltf :: proc(
             texture_idx: u32
             texture := upload_texture(img, &upload_arena)
 
-            texture_idx = gpu.desc_pool_alloc_texture(desc_pool, gpu.texture_view_descriptor(texture, {}))
+            texture_idx = gpu.descriptor_pool_alloc_texture(desc_pool, gpu.texture_view_descriptor(texture, {}))
             if sync.guard(&mutex) do image_to_texture[info.image_index] = {texture, texture_idx}
 
             sync.one_shot_event_signal(event)

@@ -9,6 +9,7 @@ import "core:slice"
 import "core:fmt"
 import "core:log"
 import "core:thread"
+import "core:sync"
 
 import "no_gfx_api/gpu"
 import oidn "oidn_odin_bindings"
@@ -16,6 +17,8 @@ import oidn "oidn_odin_bindings"
 Handle :: struct { idx: u32, gen: u32 }
 Mesh_Handle :: distinct Handle
 Lightmap_UV_Handle :: distinct Handle
+
+MAX_MESHES :: 65535
 
 Context :: struct
 {
@@ -34,6 +37,11 @@ Context :: struct
     // Global resources
     meshes: Resource_Pool(Mesh_Handle, Mesh),
     lm_uvs: Resource_Pool(Lightmap_UV_Handle, LM_UVs),
+
+    meshes_gpu: gpu.slice_t(Mesh_Shader),
+    meshes_gpu_is_stale: bool,
+
+    mutex: sync.Mutex,
 }
 
 init :: proc(ctx: ^Context, desc_pool: ^gpu.Descriptor_Pool)
@@ -43,8 +51,9 @@ init :: proc(ctx: ^Context, desc_pool: ^gpu.Descriptor_Pool)
     ctx.bvh_scratch_arena = gpu.arena_create(mem_type = gpu.Memory.GPU)
     ctx.upload_arena = gpu.arena_create()
     ctx.desc_pool = desc_pool
-    ctx.linear_sampler_id = gpu.desc_pool_alloc_sampler(desc_pool, gpu.sampler_descriptor({}))
-    ctx.point_sampler_id = gpu.desc_pool_alloc_sampler(desc_pool, gpu.sampler_descriptor({ min_filter = .Nearest, mag_filter = .Nearest }))
+    ctx.linear_sampler_id = gpu.descriptor_pool_alloc_sampler(desc_pool, gpu.sampler_descriptor({}))
+    ctx.point_sampler_id = gpu.descriptor_pool_alloc_sampler(desc_pool, gpu.sampler_descriptor({ min_filter = .Nearest, mag_filter = .Nearest }))
+    ctx.meshes_gpu = gpu.mem_alloc(Mesh_Shader, MAX_MESHES, gpu.Memory.GPU)
     pool_init(&ctx.meshes)
     pool_init(&ctx.lm_uvs)
 }
@@ -68,6 +77,7 @@ cleanup :: proc(ctx: ^Context)
     shaders_destroy(&ctx.shaders)
     gpu.arena_destroy(&ctx.bvh_scratch_arena)
     gpu.arena_destroy(&ctx.upload_arena)
+    gpu.mem_free(ctx.meshes_gpu)
     ctx^ = {}
 }
 
@@ -101,6 +111,7 @@ add_mesh :: proc(using ctx: ^Context, cmd_buf: gpu.Command_Buffer, desc: Mesh_De
         bvh       = bvh,
     })
 
+    ctx.meshes_gpu_is_stale = true
     return res
 }
 
@@ -110,6 +121,8 @@ remove_mesh :: proc(ctx: ^Context, handle: ^Mesh_Handle)
     mesh_destroy(&mesh)
     pool_remove(&ctx.meshes, handle^)
     handle^ = {}
+
+    ctx.meshes_gpu_is_stale = true
 }
 
 Lightmap_UVs_Desc :: struct
@@ -237,14 +250,14 @@ bake_progress :: proc(bake: ^Bake) -> f32
     return f32(bake.accum_counter) / f32(bake.max_samples) if bake.max_samples != 0 else 0
 }
 
-bake_submit_scene :: proc(bake: ^Bake, upload_arena: ^gpu.Arena, instances: []Instance, charts: []Chart)
+bake_submit_scene :: proc(bake: ^Bake, staging_arena: ^gpu.Arena, instances: []Instance, charts: []Chart)
 {
-    bake_submit_scene_impl(bake, upload_arena, instances, charts)
+    bake_submit_scene_impl(bake, staging_arena, instances, charts)
 }
 
-bake_submit_lights :: proc(bake: ^Bake, upload_arena: ^gpu.Arena, lights: Lights)
+bake_submit_lights :: proc(bake: ^Bake, staging_arena: ^gpu.Arena, lights: Lights)
 {
-    bake_submit_lights_impl(bake, upload_arena, lights)
+    bake_submit_lights_impl(bake, staging_arena, lights)
 }
 
 bake_iteration :: proc(bake: ^Bake, frame_arena: ^gpu.Arena, fix_seams: bool, denoise_on_preview: bool)
@@ -263,6 +276,10 @@ bake_destroy :: proc(bake: ^Bake)
     gbufs_destroy(&bake.gbufs)
     gpu.texture_free_and_destroy(&bake.pathtrace_output)
     gpu.texture_free_and_destroy(&bake.tmp_tex)
+    if bake.has_scene {
+        gpu.descriptor_pool_free_bvhs(bake.ctx.desc_pool, bake.scene_gpu.bvh_id)
+        gpu.descriptor_pool_free_textures_rw(bake.ctx.desc_pool, bake.gbufs_id)
+    }
     scene_destroy(&bake.scene_gpu)
     external_buf_destroy(&bake.shared_buf_vk)
     bake^ = {}

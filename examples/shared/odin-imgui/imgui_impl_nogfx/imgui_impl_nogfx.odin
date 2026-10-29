@@ -281,7 +281,7 @@ create_fonts_texture :: proc(desc_pool: ^gpu.Descriptor_Pool)
     })
     gpu.cmd_copy_to_texture(cmd_buf, bd.fonts_texture, staging)
 
-    bd.fonts_texture_id = gpu.desc_pool_alloc_texture(desc_pool, gpu.texture_view_descriptor(bd.fonts_texture, {}))
+    bd.fonts_texture_id = gpu.descriptor_pool_alloc_texture(desc_pool, gpu.texture_view_descriptor(bd.fonts_texture, {}))
 
     // Store our identifier
     im.font_atlas_set_tex_id(io.fonts, im.Texture_ID(bd.fonts_texture_id))
@@ -331,7 +331,7 @@ create_device_objects :: proc(desc_pool: ^gpu.Descriptor_Pool)
 
     bd.created_device_objects = true
 
-    bd.sampler_linear_id = gpu.desc_pool_alloc_sampler(desc_pool, gpu.sampler_descriptor({
+    bd.sampler_linear_id = gpu.descriptor_pool_alloc_sampler(desc_pool, gpu.sampler_descriptor({
         min_filter = .Linear,
         mag_filter = .Linear,
         mip_filter = .Linear,
@@ -341,7 +341,7 @@ create_device_objects :: proc(desc_pool: ^gpu.Descriptor_Pool)
         min_lod = -1000,
         max_lod =  1000
     }))
-    bd.sampler_nearest_id = gpu.desc_pool_alloc_sampler(desc_pool, gpu.sampler_descriptor({
+    bd.sampler_nearest_id = gpu.descriptor_pool_alloc_sampler(desc_pool, gpu.sampler_descriptor({
         min_filter = .Nearest,
         mag_filter = .Nearest,
         mip_filter = .Nearest,

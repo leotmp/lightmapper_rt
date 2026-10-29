@@ -65,6 +65,7 @@ main :: (vert_id: uint @vert_id, instance_id: uint @instance_id, data: ^Data @da
     chart_idx := data.lm_chart_indices[vert_id];
     chart_base := data.lm_chart_base;
     lm_uvs := get_lm_uv(data.lm_charts[chart_base + chart_idx], data.lightmap_uvs[vert_id]);
+    //lm_uvs := data.lightmap_uvs[vert_id] + vec2(float(chart_base));
 
     vert_out: Output;
     vert_out.out_pos = vec4((lm_uvs * 2 - 1) + ndc_offset, 0, 1);
